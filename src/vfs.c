@@ -185,9 +185,19 @@ const char *vfs_user_dir(void) { return user_mount->root; }
 // Build canonical absolute virtual path: backslashes, no "." / "..", no dup separators.
 void vfs_full_path(const char *in, char *out, size_t outsz) {
     char buf[1024];
-    if (isalpha((unsigned char)in[0]) && in[1] == ':')
-        snprintf(buf, sizeof buf, "%s", in);
-    else if (in[0] == '\\' || in[0] == '/')
+    if (isalpha((unsigned char)in[0]) && in[1] == ':') {
+        // "X:\path" / "X:" is absolute on drive X; "X:path" (no separator) is
+        // relative to the current directory on drive X. Windows keeps a current
+        // dir per drive; we track one (the game's drive). GTA's disc check scans
+        // every drive for "<drive>:AUDIO\WILD.ADF" (drive-relative) — on the game's
+        // drive that must land in the game folder, as it does under Windows/Wine.
+        if (in[2] == '\\' || in[2] == '/' || in[2] == 0)
+            snprintf(buf, sizeof buf, "%s", in);
+        else if (toupper((unsigned char)in[0]) == toupper((unsigned char)cwd[0]))
+            snprintf(buf, sizeof buf, "%s\\%s", cwd, in + 2);
+        else
+            snprintf(buf, sizeof buf, "%c:\\%s", in[0], in + 2);
+    } else if (in[0] == '\\' || in[0] == '/')
         snprintf(buf, sizeof buf, "C:%s", in);
     else
         snprintf(buf, sizeof buf, "%s\\%s", cwd, in);

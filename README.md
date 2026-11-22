@@ -55,6 +55,7 @@ This list is small and grows as games are tried. Anything not listed is simply u
 |---|---|
 | **GTA: San Andreas** | The primary target; reaches gameplay. |
 | **GTA III** | A primary target. The Steam build loads, plays the intros and reaches the main menu, rendering steadily. |
+| **GTA: Vice City** | A primary target. The Steam build loads, passes its disc check, plays the intros and reaches the main menu. |
 | **Tomb Raider III** (`--exe tomb3.exe`) | Runs, including its FMVs and music. |
 | **Age of Empires II HD** | Reaches the menus and gameplay; some GDI UI text still renders imperfectly. |
 
@@ -62,7 +63,6 @@ This list is small and grows as games are tried. Anything not listed is simply u
 
 | Game | Status |
 |---|---|
-| **GTA: Vice City** (Steam build) | A primary target. Now loads and plays the intros (the earlier startup failure is fixed); may still stop at the game's "no CD" disc-presence check. |
 | **Rayman Legends** | Requires Uplay, which Wineless does not provide. |
 
 When a game depends on an external launcher or service Wineless doesn't implement (Uplay,
