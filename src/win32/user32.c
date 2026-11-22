@@ -388,6 +388,9 @@ API(user32, SetCursor, 1) {
     apply_cursor_visibility();
     return 0x00030000;
 }
+API(user32, SwapMouseButton, 1) { return FALSE; } // we never swap the buttons
+API(user32, GetDoubleClickTime, 0) { return 500; }
+API(user32, SetDoubleClickTime, 1) { return TRUE; }
 API(user32, ShowCursor, 1) {
     cursor_count += ARG(0) ? 1 : -1;
     apply_cursor_visibility();

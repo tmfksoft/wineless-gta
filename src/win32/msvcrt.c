@@ -12,10 +12,13 @@
 //   printf family  a complete MSVC-style formatter (including floats and the
 //                narrow/wide %s/%S swap) over 32-bit guest varargs.
 #include <ctype.h>
+#include <fcntl.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <strings.h>
+#include <sys/stat.h>
 #include <time.h>
 #include <unistd.h>
 #include <wctype.h>
@@ -23,6 +26,7 @@
 #include "../cpu.h"
 #include "../heap.h"
 #include "../thread.h"
+#include "../vfs.h"
 #include "win32.h"
 
 uint32_t win32_getenv(const char *name);
@@ -250,6 +254,18 @@ API_C(msvcrt, _snprintf, 3) {
     free(s);
     return r;
 }
+API_C(msvcrt, sprintf, 2) {
+    char *s = msvc_format(PTR(1), false, _args + 2);
+    uint32_t r = put_narrow(PTR(0), 0x7FFFFFFFu, s);
+    free(s);
+    return r;
+}
+API_C(msvcrt, vsprintf, 3) {
+    char *s = msvc_format(PTR(1), false, PTR(2));
+    uint32_t r = put_narrow(PTR(0), 0x7FFFFFFFu, s);
+    free(s);
+    return r;
+}
 API_C(msvcrt, _vsnprintf, 4) {
     char *s = msvc_format(PTR(2), false, PTR(3));
     uint32_t r = put_narrow(PTR(0), ARG(1), s);
@@ -371,6 +387,14 @@ CI1(_CIlog, log(x))
 CI2(_CIpow, pow(x, y))
 CI2(_CIatan2, atan2(x, y))
 CI2(_CIfmod, fmod(x, y))
+
+// _ftol: pop a double off the FPU stack, return (long long) truncated toward
+// zero in edx:eax — MSVC's helper for a float/double -> integer cast.
+API_C(msvcrt, _ftol, 0) {
+    int64_t v = (int64_t)fpu_pop();
+    api_ret_edx((uint32_t)((uint64_t)v >> 32));
+    return (uint32_t)v;
+}
 
 // _controlfp(new, mask): MSVC flag layout <-> x87 control word bits
 static uint32_t cw_to_msvc(uint16_t cw) {
@@ -556,6 +580,138 @@ API_C(msvcrt, _errno, 0) {
     return e;
 }
 
+// _acmdln: the CRT's char* holding the ANSI command line. Point it at ours
+// (the CRT and some programs parse it directly instead of GetCommandLineA).
+API_DATA_EXPORT(msvcrt, _acmdln) {
+    static uint32_t p;
+    if (!p) { p = gheap_alloc(4, 0); *(uint32_t *)G2H(p) = g_guest_cmdline; }
+    return p;
+}
+
+// _access(path, mode): 0 if the file is accessible, -1 otherwise. Windows' mode
+// bits (0=exist, 2=write, 4=read) match POSIX R_OK/W_OK/F_OK, so pass them through.
+API_C(msvcrt, _access, 2) {
+    char host[2048];
+    if (!vfs_to_host(STR(0), host, sizeof host)) return (uint32_t)-1;
+    return access(host, ARG(1)) == 0 ? 0 : (uint32_t)-1;
+}
+// _stat(path, struct _stat*): MSVC's 32-bit-time struct _stat is 36 bytes;
+// st_mode is at +6, st_size at +20 (the fields games actually read).
+API_C(msvcrt, _stat, 2) {
+    char host[2048];
+    if (!vfs_to_host(STR(0), host, sizeof host)) return (uint32_t)-1;
+    struct stat st;
+    if (stat(host, &st) != 0) return (uint32_t)-1;
+    uint8_t *o = PTR(1);
+    memset(o, 0, 36);
+    *(uint16_t *)(o + 6) = (S_ISDIR(st.st_mode) ? 0x4000 : 0x8000) | 0x1B6; // _S_IFDIR/_S_IFREG|rw
+    *(uint16_t *)(o + 8) = 1;                             // st_nlink
+    *(uint32_t *)(o + 20) = (uint32_t)st.st_size;         // st_size
+    *(uint32_t *)(o + 24) = (uint32_t)st.st_atime;
+    *(uint32_t *)(o + 28) = (uint32_t)st.st_mtime;
+    *(uint32_t *)(o + 32) = (uint32_t)st.st_ctime;
+    return 0;
+}
+
+// ---------------------------------------------------------------- stdio FILE*
+// Games treat FILE* as opaque (no getc/putc macros here), so each open is a
+// 32-byte guest cookie whose first word indexes a host FILE* in this table.
+static FILE *g_files[512];
+static pthread_mutex_t g_files_lk = PTHREAD_MUTEX_INITIALIZER;
+#define FILE_MAGIC 0x4C494657u // 'WFIL' — marks our cookies apart from _iob[]
+static FILE *file_of(uint32_t gf) {
+    if (!gf) return NULL;
+    uint32_t *p = G2H(gf);
+    if (p[0] != FILE_MAGIC) return NULL; // a std stream (_iob) or not ours
+    return p[1] && p[1] <= 512 ? g_files[p[1] - 1] : NULL;
+}
+static uint32_t file_new(FILE *f) {
+    pthread_mutex_lock(&g_files_lk);
+    uint32_t gf = 0;
+    for (int i = 0; i < 512; i++)
+        if (!g_files[i]) {
+            g_files[i] = f;
+            gf = gheap_alloc(32, 1);
+            ((uint32_t *)G2H(gf))[0] = FILE_MAGIC;
+            ((uint32_t *)G2H(gf))[1] = i + 1;
+            break;
+        }
+    pthread_mutex_unlock(&g_files_lk);
+    if (!gf) fclose(f);
+    return gf;
+}
+static int file_no(uint32_t gf); // the std-stream helper, defined below
+API_C(msvcrt, fopen, 2) {
+    char host[2048];
+    if (!vfs_to_host(STR(0), host, sizeof host)) return 0;
+    char mode[8];
+    int m = 0;
+    for (const char *p = STR(1); *p && m < 7; p++)
+        if (*p != 't') mode[m++] = *p; // POSIX fopen rejects 't'
+    mode[m] = 0;
+    FILE *f = fopen(host, mode);
+    return f ? file_new(f) : 0;
+}
+API_C(msvcrt, fclose, 1) {
+    uint32_t gf = ARG(0);
+    FILE *f = file_of(gf);
+    if (!f) return (uint32_t)-1; // EOF
+    pthread_mutex_lock(&g_files_lk);
+    g_files[((uint32_t *)G2H(gf))[1] - 1] = NULL;
+    pthread_mutex_unlock(&g_files_lk);
+    int r = fclose(f);
+    gheap_free(gf);
+    return r ? (uint32_t)-1 : 0;
+}
+API_C(msvcrt, fread, 4) {
+    FILE *f = file_of(ARG(3));
+    return f ? (uint32_t)fread(PTR(0), ARG(1), ARG(2), f) : 0;
+}
+static void diag_write(const void *buf, size_t n);
+API_C(msvcrt, fwrite, 4) {
+    FILE *f = file_of(ARG(3));
+    if (f) return (uint32_t)fwrite(PTR(0), ARG(1), ARG(2), f);
+    int fd = file_no(ARG(3)); // a std stream (stdout/stderr)?
+    if (fd == 1 || fd == 2) diag_write(PTR(0), (size_t)ARG(1) * ARG(2));
+    return ARG(2);
+}
+API_C(msvcrt, fseek, 3) {
+    FILE *f = file_of(ARG(0));
+    return f ? (uint32_t)fseek(f, (int32_t)ARG(1), ARG(2)) : (uint32_t)-1;
+}
+API_C(msvcrt, ftell, 1) {
+    FILE *f = file_of(ARG(0));
+    return f ? (uint32_t)ftell(f) : (uint32_t)-1;
+}
+API_C(msvcrt, fgets, 3) {
+    FILE *f = file_of(ARG(2));
+    return f && fgets(PTR(0), (int)ARG(1), f) ? ARG(0) : 0;
+}
+// Low-level fd I/O: host fds are small ints, so pass them straight through.
+API_C(msvcrt, _open, 3) {
+    char host[2048];
+    if (!vfs_to_host(STR(0), host, sizeof host)) return (uint32_t)-1;
+    int f = ARG(1) & 3; // O_RDONLY/WRONLY/RDWR share the low bits
+    if (ARG(1) & 0x100) f |= O_CREAT;
+    if (ARG(1) & 0x200) f |= O_TRUNC;
+    if (ARG(1) & 0x008) f |= O_APPEND;
+    return (uint32_t)open(host, f, 0644);
+}
+API_C(msvcrt, _close, 1) { return (uint32_t)close((int)ARG(0)); }
+API_C(msvcrt, _write, 3) { return (uint32_t)write((int)ARG(0), PTR(1), ARG(2)); }
+
+// clock(): processor time in CLOCKS_PER_SEC units; Windows uses 1000 (ms).
+API_C(msvcrt, clock, 0) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint32_t)(ts.tv_sec * 1000 + ts.tv_nsec / 1000000);
+}
+API_C(msvcrt, time, 1) {
+    uint32_t t = (uint32_t)time(NULL);
+    if (ARG(0)) *(uint32_t *)PTR(0) = t;
+    return t;
+}
+
 // __p__fmode / __p__commode: pointers to the CRT's _fmode / _commode globals,
 // which MSVC startup reads and writes. Zero-initialised = _O_TEXT / default.
 API_C(msvcrt, __p__fmode, 0) {
@@ -598,17 +754,10 @@ API_DATA_EXPORT(msvcrt, __badioinfo) {
 static void diag_write(const void *buf, size_t n) {
     if (n) fprintf(stderr, "[guest] %.*s%s", (int)n, (const char *)buf, ((const char *)buf)[n - 1] == '\n' ? "" : "\n");
 }
-API_C(msvcrt, fwrite, 4) {
-    int fd = file_no(ARG(3));
-    if (fd == 1 || fd == 2) diag_write(PTR(0), (size_t)ARG(1) * ARG(2));
-    return ARG(2);
+API_C(msvcrt, fflush, 1) {
+    FILE *f = file_of(ARG(0));
+    return f ? (uint32_t)fflush(f) : 0;
 }
-API_C(msvcrt, fread, 4) { return 0; }
-API_C(msvcrt, fflush, 1) { return 0; }
 API_C(msvcrt, _fileno, 1) { return (uint32_t)file_no(ARG(0)); }
 API_C(msvcrt, _isatty, 1) { return 0; }
-API_C(msvcrt, _write, 3) {
-    if (ARG(0) == 1 || ARG(0) == 2) diag_write(PTR(1), ARG(2));
-    return ARG(2);
-}
 API_C(msvcrt, _lseeki64, 4) { api_ret_edx(0xFFFFFFFF); return 0xFFFFFFFF; }
