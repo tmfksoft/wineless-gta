@@ -49,6 +49,9 @@ static void block_async_signals(void) {
 static Thread *thread_alloc(uint32_t stack_size) {
     Thread *t = calloc(1, sizeof *t);
     if (!stack_size) stack_size = 0x200000; // exe's SizeOfStackReserve
+    // We commit the whole stack up front rather than growing it on guard-page
+    // faults like Windows, so keep a 2 MB floor for exes that reserve less.
+    if (stack_size < 0x200000) stack_size = 0x200000;
     stack_size = (stack_size + 0xFFFF) & ~0xFFFFu;
     t->stack_size = stack_size;
     // guard page at the bottom stays reserved/uncommitted

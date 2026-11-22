@@ -111,6 +111,11 @@ void display_apply(SDL_Window *win, uint32_t w, uint32_t h, int game_wants_fulls
         }
         SDL_SetWindowFullscreen(win, true);
     }
+    // Show the window now the game has chosen its resolution. It was created
+    // hidden; a game that relies on WS_VISIBLE (e.g. Morrowind) never calls
+    // ShowWindow, so without this the game renders and plays audio into a window
+    // that is never mapped on screen.
+    SDL_ShowWindow(win);
     SDL_SyncWindow(win);
     applied_display = SDL_GetDisplayForWindow(win);
     SDL_RaiseWindow(win);

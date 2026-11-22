@@ -511,6 +511,11 @@ API(kernel32, GetSystemTimeAsFileTime, 1) {
     unix_to_filetime(&ts, PTR(0));
     return 0;
 }
+API(kernel32, CompareFileTime, 2) {
+    uint32_t *a = PTR(0), *b = PTR(1);
+    uint64_t ta = a[0] | (uint64_t)a[1] << 32, tb = b[0] | (uint64_t)b[1] << 32;
+    return ta < tb ? (uint32_t)-1 : ta > tb ? 1 : 0;
+}
 API(kernel32, FileTimeToLocalFileTime, 2) {
     time_t now = time(NULL);
     struct tm tm;
