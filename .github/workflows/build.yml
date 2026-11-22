@@ -1,0 +1,85 @@
+name: Build
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write        # needed to create Releases on tag builds
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    # Built on an older image on purpose: everything but glibc is linked
+    # statically, so building against glibc 2.35 keeps the binary runnable on a
+    # wide range of current distros.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential gcc-12 g++-12 cmake ninja-build \
+            python3 python3-venv python3-pip pkg-config git \
+            libx11-dev libxext-dev libxrandr-dev libxcursor-dev libxi-dev \
+            libxfixes-dev libxss-dev libxkbcommon-dev \
+            libwayland-dev libwayland-bin wayland-protocols \
+            libgl-dev libegl-dev libasound2-dev libpulse-dev \
+            libdbus-1-dev libudev-dev libdrm-dev libgbm-dev
+          echo "CC=gcc-12"  >> "$GITHUB_ENV"
+          echo "CXX=g++-12" >> "$GITHUB_ENV"
+
+      # The dependency build (glslang, SDL3, libogg/vorbis, DXVK) is slow and
+      # fully version-pinned, so cache it keyed on the scripts that produce it.
+      - name: Cache deps
+        id: deps-cache
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: deps-ubuntu2204-${{ hashFiles('scripts/build-deps.sh', 'patches/**') }}
+
+      - name: Build deps
+        if: steps.deps-cache.outputs.cache-hit != 'true'
+        run: scripts/build-deps.sh
+
+      - name: Build wineless-gta
+        run: |
+          cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
+          ninja -C build
+
+      - name: Package
+        run: |
+          mkdir -p dist
+          cp build/wineless-gta dist/wineless-gta
+          strip dist/wineless-gta
+          cp README.md dist/README.md
+          ( cd dist && sha256sum wineless-gta > wineless-gta.sha256 )
+          echo "Built wineless-gta: $(stat -c%s dist/wineless-gta) bytes (glibc baseline 2.35)"
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wineless-gta-linux-x86_64
+          path: |
+            dist/wineless-gta
+            dist/wineless-gta.sha256
+          if-no-files-found: error
+
+      - name: Publish release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/wineless-gta
+            dist/wineless-gta.sha256
+          generate_release_notes: true
+          fail_on_unmatched_files: true

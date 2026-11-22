@@ -17,6 +17,9 @@ cd "/path/to/GTA San Andreas"
 It finds `gta_sa.exe`, `gta-vc.exe`, `gta3.exe`, or another `gta*.exe` automatically; any
 other game is selected with `--exe`.
 
+Prebuilt binaries for 64-bit x86 Linux are on the
+[Releases](../../releases) page; or [build from source](#building).
+
 ## Scope and limitations
 
 **64-bit x86 Linux only.** Wineless runs the game's 32-bit x86 instructions directly on the
