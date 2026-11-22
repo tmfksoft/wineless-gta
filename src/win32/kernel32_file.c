@@ -599,3 +599,4 @@ API(kernel32, GetFullPathNameW, 4) {
 }
 
 uint32_t k32_create_mapping(uint32_t *a) { return api_kernel32_CreateFileMappingA(a); }
+uint32_t k32_map_view(uint32_t *a) { return api_kernel32_MapViewOfFile(a); }

@@ -17,9 +17,11 @@ Signature string: return code, then one code per argument.
 import re
 import sys
 
-# (SDK, class, version string, header). Versions = what games and Steam's DRM ask
-# for: SDK 1.35 (Age of Empires II HD's steam_api) and SDK 1.04 (SteamClient008,
-# used by the Steam DRM wrapper of older games such as GTA Vice City).
+# (SDK, class, version string, header). Versions = what the games we target ask
+# for: SDK 1.35 (e.g. Age of Empires II HD's steam_api) and SDK 1.04 (the older
+# SteamClient008/009 era used by games such as GTA III and Vice City).
+# ISteamClient's early methods (the pipe/user/GetISteam* slots these games use)
+# are identical across SteamClient008..017, so 008/009 reuse the 1.04 header.
 # The first entry for a class is the one host-side code calls.
 IFACES = [
     ("135", "ISteamClient", "SteamClient017", "isteamclient.h"),
@@ -35,8 +37,10 @@ IFACES = [
     ("135", "ISteamScreenshots", "STEAMSCREENSHOTS_INTERFACE_VERSION002", "isteamscreenshots.h"),
     ("135", "ISteamHTTP", "STEAMHTTP_INTERFACE_VERSION002", "isteamhttp.h"),
     ("104", "ISteamClient", "SteamClient008", "isteamclient.h"),
+    ("104", "ISteamClient", "SteamClient009", "isteamclient.h"),
     ("104", "ISteamUser", "SteamUser012", "isteamuser.h"),
     ("104", "ISteamUtils", "SteamUtils004", "isteamutils.h"),
+    ("104", "ISteamUtils", "SteamUtils005", "isteamutils.h"),
     ("104", "ISteamApps", "STEAMAPPS_INTERFACE_VERSION003", "isteamapps.h"),
     ("104", "ISteamFriends", "SteamFriends005", "isteamfriends.h"),
     ("104", "ISteamUserStats", "STEAMUSERSTATS_INTERFACE_VERSION005", "isteamuserstats.h"),

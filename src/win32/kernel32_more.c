@@ -229,6 +229,16 @@ API(kernel32, WriteConsoleW, 5) {
     if (ARG(3)) *(uint32_t *)PTR(3) = ARG(2);
     return TRUE;
 }
+API(kernel32, WriteConsoleA, 5) {
+    char b[1024];
+    uint32_t n = ARG(2) < 1023 ? ARG(2) : 1023;
+    const char *s = PTR(1);
+    for (uint32_t i = 0; i < n; i++) b[i] = s[i];
+    b[n] = 0;
+    fputs(b, stderr);
+    if (ARG(3)) *(uint32_t *)PTR(3) = ARG(2);
+    return TRUE;
+}
 API(kernel32, ReadConsoleW, 5) { return FALSE; }
 API(kernel32, GetProcessAffinityMask, 3) {
     if (ARG(1)) *(uint32_t *)PTR(1) = 1;

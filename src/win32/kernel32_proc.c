@@ -415,6 +415,8 @@ API(kernel32, VirtualQueryEx, 4) {
     return api_kernel32_VirtualQuery(_args + 1);
 }
 API(kernel32, FlushInstructionCache, 3) { return TRUE; }
+uint32_t k32_virtual_alloc(uint32_t *a) { return api_kernel32_VirtualAlloc(a); }
+uint32_t k32_open_process(uint32_t *a) { return api_kernel32_OpenProcess(a); }
 
 #define HEAP_ZERO_MEMORY 0x8
 #define HEAP_REALLOC_IN_PLACE_ONLY 0x10

@@ -307,7 +307,12 @@ static uint32_t steam_slot(int slot, uint32_t *a) {
     case 'z':
         LOGT("steam: %s::%s -> \"%s\"", f->d->cls, m->name, r ? (const char *)(uintptr_t)r : "(null)");
         return guest_str((const char *)(uintptr_t)r);
-    case 'I': return wrap((void *)(uintptr_t)r, ver_arg ? desc_by_version((const char *)G2H(ver_arg)) : NULL);
+    case 'I': {
+        const char *ver = ver_arg ? (const char *)G2H(ver_arg) : NULL;
+        const SteamIfaceDesc *id = ver ? desc_by_version(ver) : NULL;
+        if (r && ver && !id) LOGI("steam: %s::%s wants unsupported interface %s", f->d->cls, m->name, ver);
+        return wrap((void *)(uintptr_t)r, id);
+    }
     default: return (uint32_t)r;
     }
 }
