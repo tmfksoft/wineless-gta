@@ -111,6 +111,7 @@ void waveout_mix(float *out, int frames) {
 }
 
 API(winmm, waveOutGetNumDevs, 0) { return 1; }
+API(winmm, joyGetNumDevs, 0) { return 0; } // no joystick driver (installers just probe)
 API(winmm, waveOutGetDevCapsA, 3) {
     uint8_t *c = PTR(1);
     uint32_t n = ARG(2) < 52 ? ARG(2) : 52;

@@ -390,6 +390,11 @@ API(user32, SetCursor, 1) {
     return 0x00030000;
 }
 API(user32, SwapMouseButton, 1) { return FALSE; } // we never swap the buttons
+// Char iteration (single-byte code page): next/prev char, never past the ends.
+API(user32, CharNextA, 1) { return STR(0)[0] ? ARG(0) + 1 : ARG(0); }
+API(user32, CharPrevA, 2) { return ARG(1) > ARG(0) ? ARG(1) - 1 : ARG(0); }
+API(user32, CharNextW, 1) { return WSTR(0)[0] ? ARG(0) + 2 : ARG(0); }
+API(user32, CharPrevW, 2) { return ARG(1) > ARG(0) ? ARG(1) - 2 : ARG(0); }
 // LoadString: RT_STRING(6) resources are bundles of 16 length-prefixed UTF-16
 // strings; string `id` is the (id&15)th entry of bundle (id/16 + 1).
 static uint32_t load_string(uint32_t mod, uint32_t id, uint32_t buf, uint32_t max, bool wide) {

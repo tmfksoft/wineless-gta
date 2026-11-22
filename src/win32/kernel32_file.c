@@ -446,6 +446,16 @@ API(kernel32, GetVolumeInformationA, 8) {
     if (ARG(6)) copy_out_str(PTR(6), ARG(7), "NTFS");
     return TRUE;
 }
+API(kernel32, GetDiskFreeSpaceExA, 4) {
+    struct statvfs sv;
+    uint64_t freeb = 0x80000000ull, total = 0x100000000ull;
+    if (!statvfs(vfs_user_dir(), &sv)) { freeb = (uint64_t)sv.f_bavail * sv.f_frsize; total = (uint64_t)sv.f_blocks * sv.f_frsize; }
+    if (ARG(1)) *(uint64_t *)PTR(1) = freeb; // lpFreeBytesAvailable
+    if (ARG(2)) *(uint64_t *)PTR(2) = total; // lpTotalNumberOfBytes
+    if (ARG(3)) *(uint64_t *)PTR(3) = freeb; // lpTotalNumberOfFreeBytes
+    return TRUE;
+}
+API(kernel32, GetDiskFreeSpaceExW, 4) { return api_kernel32_GetDiskFreeSpaceExA(_args); }
 API(kernel32, GetDiskFreeSpaceA, 5) {
     struct statvfs sv;
     uint64_t freeb = 0x40000000ull, total = 0x80000000ull;
