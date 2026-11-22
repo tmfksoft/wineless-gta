@@ -522,6 +522,7 @@ API_C(msvcrt, __dllonexit, 3) { return ARG(0); }
 API_C(msvcrt, _lock, 1) { return 0; }
 API_C(msvcrt, _unlock, 1) { return 0; }
 API_C(msvcrt, __set_app_type, 1) { return 0; } // console/GUI hint; harmless to ignore
+API_C(msvcrt, __lconv_init, 0) { return 0; }  // locale-conv table init; default C locale is fine
 API_C(msvcrt, __setusermatherr, 1) { return 0; } // custom _matherr hook; we don't call it
 
 // __getmainargs(argc, argv, env, wildcard, startinfo): MSVC CRT argv setup.
@@ -537,6 +538,23 @@ API_C(msvcrt, __getmainargs, 5) {
     if (ARG(0)) *(uint32_t *)G2H(ARG(0)) = 1;
     if (ARG(1)) *(uint32_t *)G2H(ARG(1)) = argv_arr;
     if (ARG(2)) *(uint32_t *)G2H(ARG(2)) = env_arr;
+    return 0;
+}
+// __wgetmainargs: wide-char argv setup (UTF-16 program path as argv[0]).
+API_C(msvcrt, __wgetmainargs, 5) {
+    static uint32_t wargv, wenv;
+    if (!wargv) {
+        const char *s = (const char *)G2H(g_guest_cmdline);
+        uint32_t w0 = gheap_alloc((strlen(s) + 1) * 2, 1);
+        uint16_t *w = G2H(w0);
+        for (size_t i = 0; s[i]; i++) w[i] = (uint8_t)s[i];
+        wargv = gheap_alloc(8, 1);
+        ((uint32_t *)G2H(wargv))[0] = w0;
+        wenv = gheap_alloc(4, 1);
+    }
+    if (ARG(0)) *(uint32_t *)G2H(ARG(0)) = 1;
+    if (ARG(1)) *(uint32_t *)G2H(ARG(1)) = wargv;
+    if (ARG(2)) *(uint32_t *)G2H(ARG(2)) = wenv;
     return 0;
 }
 API_C(msvcrt, _amsg_exit, 1) { fatal("msvcrt: runtime error R60%02u", ARG(0)); }
