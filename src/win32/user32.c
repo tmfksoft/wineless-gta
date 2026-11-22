@@ -8,6 +8,7 @@
 #include <unistd.h>
 
 #include "../heap.h"
+#include "../pe.h"
 #include "display.h"
 #include "guest_printf.h"
 #include "win32.h"
@@ -389,6 +390,27 @@ API(user32, SetCursor, 1) {
     return 0x00030000;
 }
 API(user32, SwapMouseButton, 1) { return FALSE; } // we never swap the buttons
+// LoadString: RT_STRING(6) resources are bundles of 16 length-prefixed UTF-16
+// strings; string `id` is the (id&15)th entry of bundle (id/16 + 1).
+static uint32_t load_string(uint32_t mod, uint32_t id, uint32_t buf, uint32_t max, bool wide) {
+    uint32_t size, data = pe_find_resource(mod ? mod : g_exe.base, 6, id / 16 + 1, &size);
+    const uint16_t *p = data ? G2H(data) : NULL;
+    if (!p) { if (max && buf) { if (wide) *(uint16_t *)G2H(buf) = 0; else *(char *)G2H(buf) = 0; } return 0; }
+    for (uint32_t i = 0; i < (id & 15); i++) p += 1 + *p;
+    uint32_t len = *p++, n = 0;
+    if (wide) {
+        uint16_t *o = G2H(buf);
+        for (; n < len && n + 1 < max; n++) o[n] = p[n];
+        if (max) o[n] = 0;
+    } else {
+        char *o = G2H(buf);
+        for (; n < len && n + 1 < max; n++) o[n] = p[n] < 256 ? (char)p[n] : '?';
+        if (max) o[n] = 0;
+    }
+    return n;
+}
+API(user32, LoadStringA, 4) { return load_string(ARG(0), ARG(1), ARG(2), ARG(3), false); }
+API(user32, LoadStringW, 4) { return load_string(ARG(0), ARG(1), ARG(2), ARG(3), true); }
 API(user32, GetDoubleClickTime, 0) { return 500; }
 API(user32, SetDoubleClickTime, 1) { return TRUE; }
 API(user32, ShowCursor, 1) {
@@ -891,7 +913,31 @@ API(user32, SetMenu, 2) { return TRUE; }
 API(user32, DestroyMenu, 1) { return TRUE; }
 API(user32, GetDlgItemTextW, 4) { if (ARG(3)) *(uint16_t *)PTR(2) = 0; return 0; }
 API(user32, SetDlgItemTextW, 3) { return TRUE; }
-API(user32, RegisterClassExW, 1) { return 0; }
+// WNDCLASSEX prepends cbSize, so its fields are the WNDCLASS ones shifted by 1:
+// style=wc[1], lpfnWndProc=wc[2], hInstance=wc[5], lpszClassName=wc[10].
+API(user32, RegisterClassExA, 1) {
+    uint32_t *wc = PTR(0);
+    if (nclasses == 16) return 0;
+    WndClass *c = &classes[nclasses++];
+    c->style = wc[1];
+    c->wndproc = wc[2];
+    c->hinst = wc[5];
+    snprintf(c->name, sizeof c->name, "%s", wc[10] >= 0x10000 ? (const char *)G2H(wc[10]) : "#atom");
+    LOGD("RegisterClassExA(%s, wndproc=0x%x)", c->name, c->wndproc);
+    return 0xC000 + nclasses;
+}
+API(user32, RegisterClassExW, 1) {
+    uint32_t *wc = PTR(0);
+    if (nclasses == 16) return 0;
+    WndClass *c = &classes[nclasses++];
+    c->style = wc[1];
+    c->wndproc = wc[2];
+    c->hinst = wc[5];
+    if (wc[10] >= 0x10000) w2a(G2H(wc[10]), c->name, sizeof c->name);
+    else snprintf(c->name, sizeof c->name, "#atom");
+    LOGD("RegisterClassExW(%s, wndproc=0x%x)", c->name, c->wndproc);
+    return 0xC000 + nclasses;
+}
 
 // Windows hooks: handles are returned but hooks aren't invoked.
 API(user32, SetWindowsHookExW, 4) { return 0x00400001; }

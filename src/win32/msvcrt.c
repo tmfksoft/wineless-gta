@@ -338,6 +338,20 @@ API_C(msvcrt, sscanf, 2) {
 static double dbl(const uint32_t *a) { double d; memcpy(&d, a, 8); return d; }
 API_C(msvcrt, ceil, 2) { api_ret_double(ceil(dbl(_args))); return 0; }
 API_C(msvcrt, floor, 2) { api_ret_double(floor(dbl(_args))); return 0; }
+API_C(msvcrt, sqrt, 2) { api_ret_double(sqrt(dbl(_args))); return 0; }
+API_C(msvcrt, fabs, 2) { api_ret_double(fabs(dbl(_args))); return 0; }
+API_C(msvcrt, sin, 2) { api_ret_double(sin(dbl(_args))); return 0; }
+API_C(msvcrt, cos, 2) { api_ret_double(cos(dbl(_args))); return 0; }
+API_C(msvcrt, tan, 2) { api_ret_double(tan(dbl(_args))); return 0; }
+API_C(msvcrt, asin, 2) { api_ret_double(asin(dbl(_args))); return 0; }
+API_C(msvcrt, acos, 2) { api_ret_double(acos(dbl(_args))); return 0; }
+API_C(msvcrt, atan, 2) { api_ret_double(atan(dbl(_args))); return 0; }
+API_C(msvcrt, exp, 2) { api_ret_double(exp(dbl(_args))); return 0; }
+API_C(msvcrt, log, 2) { api_ret_double(log(dbl(_args))); return 0; }
+API_C(msvcrt, log10, 2) { api_ret_double(log10(dbl(_args))); return 0; }
+API_C(msvcrt, pow, 4) { api_ret_double(pow(dbl(_args), dbl(_args + 2))); return 0; }
+API_C(msvcrt, atan2, 4) { api_ret_double(atan2(dbl(_args), dbl(_args + 2))); return 0; }
+API_C(msvcrt, fmod, 4) { api_ret_double(fmod(dbl(_args), dbl(_args + 2))); return 0; }
 API_C(msvcrt, ldexp, 3) { api_ret_double(ldexp(dbl(_args), (int)ARG(2))); return 0; }
 API_C(msvcrt, frexp, 3) {
     int e;
@@ -711,6 +725,10 @@ API_C(msvcrt, time, 1) {
     if (ARG(0)) *(uint32_t *)PTR(0) = t;
     return t;
 }
+// __chkesp: MSVC debug stack-pointer check, called after every call. We skip the
+// check; it must leave eax (the just-returned value) untouched, so return the
+// guest's entry eax (saved into ctx->eax by the dispatch).
+API_C(msvcrt, _chkesp, 0) { return thread_current()->ctx->eax; }
 
 // __p__fmode / __p__commode: pointers to the CRT's _fmode / _commode globals,
 // which MSVC startup reads and writes. Zero-initialised = _O_TEXT / default.

@@ -86,6 +86,7 @@ host_dispatch:
     mov %esi, 0x48(%r14)
     mov %edi, 0x4c(%r14)
     mov %ecx, 0x50(%r14)          // thiscall `this`
+    mov %eax, C_EAX(%r14)         // default return = guest's eax (transparent fns, e.g. _chkesp)
     mov C_HOST_SP(%r14), %rsp     // host_sp is 8 mod 16 (see call32_raw)
     sub $8, %rsp
     push %rsi                     // guest esi/edi are callee-saved for stdcall
