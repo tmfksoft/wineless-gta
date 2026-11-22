@@ -77,6 +77,12 @@ CTYPE(isalpha)
 CTYPE(isdigit)
 CTYPE(isspace)
 CTYPE(isxdigit)
+CTYPE(isupper)
+CTYPE(islower)
+CTYPE(iscntrl)
+CTYPE(ispunct)
+CTYPE(isprint)
+CTYPE(isgraph)
 API_C(msvcrt, isleadbyte, 1) { return 0; } // single-byte code page
 API_C(msvcrt, iswalpha, 1) { return iswalpha(ARG(0) & 0xFFFF) ? 1 : 0; }
 API_C(msvcrt, iswdigit, 1) { return iswdigit(ARG(0) & 0xFFFF) ? 1 : 0; }
@@ -713,6 +719,47 @@ API_C(msvcrt, _open, 3) {
 }
 API_C(msvcrt, _close, 1) { return (uint32_t)close((int)ARG(0)); }
 API_C(msvcrt, _write, 3) { return (uint32_t)write((int)ARG(0), PTR(1), ARG(2)); }
+
+// _splitpath(path, drive, dir, fname, ext): split a path; any output may be NULL.
+API_C(msvcrt, _splitpath, 5) {
+    const char *p = STR(0);
+    char *drive = ARG(1) ? PTR(1) : NULL, *dir = ARG(2) ? PTR(2) : NULL;
+    char *fn = ARG(3) ? PTR(3) : NULL, *ext = ARG(4) ? PTR(4) : NULL;
+    if (drive) drive[0] = 0;
+    if (dir) dir[0] = 0;
+    if (fn) fn[0] = 0;
+    if (ext) ext[0] = 0;
+    if (p[0] && p[1] == ':') {
+        if (drive) { drive[0] = p[0]; drive[1] = ':'; drive[2] = 0; }
+        p += 2;
+    }
+    const char *slash = NULL, *dot = NULL;
+    for (const char *q = p; *q; q++) if (*q == '\\' || *q == '/') slash = q;
+    if (slash) {
+        size_t n = slash - p + 1;
+        if (dir) { memcpy(dir, p, n); dir[n] = 0; }
+        p = slash + 1;
+    }
+    for (const char *q = p; *q; q++) if (*q == '.') dot = q;
+    if (dot) {
+        if (fn) { size_t n = dot - p; memcpy(fn, p, n); fn[n] = 0; }
+        if (ext) strcpy(ext, dot);
+    } else if (fn) strcpy(fn, p);
+    return 0;
+}
+// _makepath(path, drive, dir, fname, ext): the inverse of _splitpath.
+API_C(msvcrt, _makepath, 5) {
+    char *out = PTR(0);
+    out[0] = 0;
+    if (ARG(1) && STR(1)[0]) strcpy(out, STR(1));
+    if (ARG(2) && STR(2)[0]) strcat(out, STR(2));
+    if (ARG(3)) strcat(out, STR(3));
+    if (ARG(4) && STR(4)[0]) {
+        if (STR(4)[0] != '.') strcat(out, ".");
+        strcat(out, STR(4));
+    }
+    return 0;
+}
 
 // clock(): processor time in CLOCKS_PER_SEC units; Windows uses 1000 (ms).
 API_C(msvcrt, clock, 0) {
