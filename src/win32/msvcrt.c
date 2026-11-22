@@ -50,6 +50,17 @@ API_C(msvcrt, strchr, 2) { return gptr(strchr(STR(0), (int)(ARG(1) & 0xFF))); }
 API_C(msvcrt, strrchr, 2) { return gptr(strrchr(STR(0), (int)(ARG(1) & 0xFF))); }
 API_C(msvcrt, strstr, 2) { return gptr(strstr(STR(0), STR(1))); }
 API_C(msvcrt, strncmp, 3) { return (uint32_t)strncmp(STR(0), STR(1), ARG(2)); }
+API_C(msvcrt, strlen, 1) { return (uint32_t)strlen(STR(0)); }
+API_C(msvcrt, strcmp, 2) { return (uint32_t)strcmp(STR(0), STR(1)); }
+API_C(msvcrt, strcpy, 2) { strcpy(PTR(0), STR(1)); return ARG(0); }
+API_C(msvcrt, strncpy, 3) { strncpy(PTR(0), STR(1), ARG(2)); return ARG(0); }
+API_C(msvcrt, strcat, 2) { strcat(PTR(0), STR(1)); return ARG(0); }
+API_C(msvcrt, strncat, 3) { strncat(PTR(0), STR(1), ARG(2)); return ARG(0); }
+API_C(msvcrt, memcmp, 3) { return (uint32_t)memcmp(PTR(0), PTR(1), ARG(2)); }
+API_C(msvcrt, strpbrk, 2) { return gptr(strpbrk(STR(0), STR(1))); }
+API_C(msvcrt, strspn, 2) { return (uint32_t)strspn(STR(0), STR(1)); }
+API_C(msvcrt, strcspn, 2) { return (uint32_t)strcspn(STR(0), STR(1)); }
+API_C(msvcrt, strtok, 2) { return gptr(strtok(ARG(0) ? PTR(0) : NULL, STR(1))); }
 API_C(msvcrt, _stricmp, 2) { return (uint32_t)strcasecmp(STR(0), STR(1)); }
 API_C(msvcrt, _strnicmp, 3) { return (uint32_t)strncasecmp(STR(0), STR(1), ARG(2)); }
 API_C(msvcrt, _strdup, 1) { return ARG(0) ? gheap_strdup(STR(0)) : 0; }
@@ -466,6 +477,24 @@ API_C(msvcrt, _onexit, 1) { return ARG(0); }
 API_C(msvcrt, __dllonexit, 3) { return ARG(0); }
 API_C(msvcrt, _lock, 1) { return 0; }
 API_C(msvcrt, _unlock, 1) { return 0; }
+API_C(msvcrt, __set_app_type, 1) { return 0; } // console/GUI hint; harmless to ignore
+API_C(msvcrt, __setusermatherr, 1) { return 0; } // custom _matherr hook; we don't call it
+
+// __getmainargs(argc, argv, env, wildcard, startinfo): MSVC CRT argv setup.
+// We give argv[0] = the program path and an empty environment; games that read
+// the command line use GetCommandLineA, which we answer in full.
+API_C(msvcrt, __getmainargs, 5) {
+    static uint32_t argv_arr, env_arr;
+    if (!argv_arr) {
+        argv_arr = gheap_alloc(8, 1); // [argv[0], NULL]
+        ((uint32_t *)G2H(argv_arr))[0] = g_guest_cmdline;
+        env_arr = gheap_alloc(4, 1); // [NULL]
+    }
+    if (ARG(0)) *(uint32_t *)G2H(ARG(0)) = 1;
+    if (ARG(1)) *(uint32_t *)G2H(ARG(1)) = argv_arr;
+    if (ARG(2)) *(uint32_t *)G2H(ARG(2)) = env_arr;
+    return 0;
+}
 API_C(msvcrt, _amsg_exit, 1) { fatal("msvcrt: runtime error R60%02u", ARG(0)); }
 API_C(msvcrt, abort, 0) { fatal("msvcrt: abort()"); }
 API_C(msvcrt, exit, 1) { win32_process_exit(ARG(0)); }
@@ -525,6 +554,19 @@ API_C(msvcrt, _errno, 0) {
     static __thread uint32_t e;
     if (!e) e = gheap_alloc(4, 1);
     return e;
+}
+
+// __p__fmode / __p__commode: pointers to the CRT's _fmode / _commode globals,
+// which MSVC startup reads and writes. Zero-initialised = _O_TEXT / default.
+API_C(msvcrt, __p__fmode, 0) {
+    static uint32_t p;
+    if (!p) p = gheap_alloc(4, 1);
+    return p;
+}
+API_C(msvcrt, __p__commode, 0) {
+    static uint32_t p;
+    if (!p) p = gheap_alloc(4, 1);
+    return p;
 }
 
 // ---------------------------------------------------------------- stdio (diagnostics only)
