@@ -51,27 +51,33 @@ jobs:
         if: steps.deps-cache.outputs.cache-hit != 'true'
         run: scripts/build-deps.sh
 
-      - name: Build wineless-gta
+      - name: Build wineless-gta + libretro core
         run: |
+          # BUILD_LIBRETRO is ON by default, so this builds both the standalone
+          # executable and wineless_libretro.so (for libretro frontends).
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=RelWithDebInfo
           ninja -C build
 
       - name: Package
         run: |
           mkdir -p dist
-          cp build/wineless-gta dist/wineless-gta
-          strip dist/wineless-gta
+          cp build/wineless-gta          dist/wineless-gta
+          cp build/wineless_libretro.so  dist/wineless_libretro.so
+          strip dist/wineless-gta dist/wineless_libretro.so
           cp README.md dist/README.md
-          ( cd dist && sha256sum wineless-gta > wineless-gta.sha256 )
-          echo "Built wineless-gta: $(stat -c%s dist/wineless-gta) bytes (glibc baseline 2.35)"
+          ( cd dist && sha256sum wineless-gta wineless_libretro.so > checksums.sha256 )
+          echo "wineless-gta:          $(stat -c%s dist/wineless-gta) bytes"
+          echo "wineless_libretro.so:  $(stat -c%s dist/wineless_libretro.so) bytes"
+          echo "(glibc baseline 2.35 — runs on a wide range of current distros)"
 
       - name: Upload build artifact
         uses: actions/upload-artifact@v4
         with:
-          name: wineless-gta-linux-x86_64
+          name: wineless-linux-x86_64
           path: |
             dist/wineless-gta
-            dist/wineless-gta.sha256
+            dist/wineless_libretro.so
+            dist/checksums.sha256
           if-no-files-found: error
 
       - name: Publish release
@@ -80,6 +86,7 @@ jobs:
         with:
           files: |
             dist/wineless-gta
-            dist/wineless-gta.sha256
+            dist/wineless_libretro.so
+            dist/checksums.sha256
           generate_release_notes: true
           fail_on_unmatched_files: true
