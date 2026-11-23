@@ -1,0 +1,17 @@
+FROM ubuntu:24.04
+ENV DEBIAN_FRONTEND=noninteractive
+# retrolive v1.12.0 runtime (FFmpeg 6 era) + ffmpeg CLI for verifying output +
+# a headless X server (Xvfb) and software Vulkan (lavapipe) so the Wineless
+# guest's DXVK can create a real surface without a GPU.
+RUN apt-get update && apt-get install -y --no-install-recommends \
+      ffmpeg \
+      libsdl2-2.0-0 \
+      libegl1 libgl1 libglx-mesa0 libgbm1 libdrm2 \
+      mesa-vulkan-drivers libvulkan1 vulkan-tools \
+      xvfb libx11-6 libxext6 libxrandr2 libxcursor1 libxi6 libxfixes3 \
+      libxkbcommon0 libxss1 \
+      libcurl4 libssl3 \
+      libpulse0 libasound2t64 libsndfile1 \
+      libdbus-1-3 libdecor-0-0 \
+      libmp3lame0 libopus0 libvorbis0a libogg0 libflac12t64 \
+    && rm -rf /var/lib/apt/lists/*

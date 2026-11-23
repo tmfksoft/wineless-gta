@@ -245,10 +245,32 @@ void dsound_set_paused(int paused) {
     else SDL_ResumeAudioStreamDevice(stream);
 }
 
+// ---- libretro core audio bridge ----
+// When set, the core owns audio output and pulls the mixer itself (see
+// wl_audio_pull); dsound must not also drive mix() from SDL or the null thread.
+int wl_core_audio = 0;
+int wl_audio_rate(void) { return OUT_RATE; }
+int wl_audio_pull(short *out, int frames) {
+    if (frames < 0) frames = 0;
+    if (frames > 2048) frames = 2048;
+    float buf[2048 * 2];
+    mix(buf, frames);
+    for (int i = 0; i < frames * 2; i++) {
+        float s = buf[i];
+        s = s > 1.0f ? 1.0f : s < -1.0f ? -1.0f : s;
+        out[i] = (short)(s * 32767.0f);
+    }
+    return frames;
+}
+
 static void audio_start(void) {
     static int started;
     if (started) return;
     started = 1;
+    if (wl_core_audio) {
+        LOGI("dsound: libretro owns audio output (core pulls the mixer)");
+        return;
+    }
     if (SDL_InitSubSystem(SDL_INIT_AUDIO)) {
         SDL_AudioSpec spec = {SDL_AUDIO_F32, 2, OUT_RATE};
         stream = SDL_OpenAudioDeviceStream(SDL_AUDIO_DEVICE_DEFAULT_PLAYBACK, &spec, audio_cb, NULL);

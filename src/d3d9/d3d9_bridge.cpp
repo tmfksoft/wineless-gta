@@ -16,6 +16,7 @@
 
 #include "../win32/display.h"
 #include "../win32/gdi.h"
+#include "../present_hook.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -260,6 +261,55 @@ void debug_screenshot(IDirect3DDevice9 *dev, unsigned frame) {
     bb->Release();
 }
 
+// libretro core: read the current back buffer into an XRGB8888 CPU buffer for
+// the frontend. The reader is a plain function pointer, so the device to read
+// from is stashed here at present time (one device is assumed, as the games use).
+static IDirect3DDevice9 *g_present_dev;
+static int d3d9_rt_read(uint32_t *dst, uint32_t dst_pitch_px) {
+    IDirect3DDevice9 *dev = g_present_dev;
+    if (!dev) return 0;
+    IDirect3DSurface9 *bb = nullptr, *sys = nullptr;
+    if (FAILED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb))) return 0;
+    D3DSURFACE_DESC d;
+    bb->GetDesc(&d);
+    int ok = 0;
+    if (SUCCEEDED(dev->CreateOffscreenPlainSurface(d.Width, d.Height, d.Format, D3DPOOL_SYSTEMMEM, &sys, nullptr)) &&
+        SUCCEEDED(dev->GetRenderTargetData(bb, sys))) {
+        D3DLOCKED_RECT lr;
+        if (SUCCEEDED(sys->LockRect(&lr, nullptr, D3DLOCK_READONLY))) {
+            for (uint32_t y = 0; y < d.Height; y++) {
+                const uint8_t *src = (const uint8_t *)lr.pBits + (size_t)y * lr.Pitch;
+                uint32_t *out = dst + (size_t)y * dst_pitch_px;
+                if (d.Format == D3DFMT_X8R8G8B8 || d.Format == D3DFMT_A8R8G8B8) {
+                    memcpy(out, src, (size_t)d.Width * 4); // already 0xXXRRGGBB
+                } else if (d.Format == D3DFMT_R5G6B5) {
+                    const uint16_t *s = (const uint16_t *)src;
+                    for (uint32_t x = 0; x < d.Width; x++) {
+                        uint16_t p = s[x];
+                        uint32_t r = (p >> 11) & 0x1f, g = (p >> 5) & 0x3f, b = p & 0x1f;
+                        out[x] = ((r << 3 | r >> 2) << 16) | ((g << 2 | g >> 4) << 8) | (b << 3 | b >> 2);
+                    }
+                } else if (d.Format == D3DFMT_X1R5G5B5 || d.Format == D3DFMT_A1R5G5B5) {
+                    const uint16_t *s = (const uint16_t *)src;
+                    for (uint32_t x = 0; x < d.Width; x++) {
+                        uint16_t p = s[x];
+                        uint32_t r = (p >> 10) & 0x1f, g = (p >> 5) & 0x1f, b = p & 0x1f;
+                        out[x] = ((r << 3 | r >> 2) << 16) | ((g << 3 | g >> 2) << 8) | (b << 3 | b >> 2);
+                    }
+                } else {
+                    sys->UnlockRect(); sys->Release(); bb->Release();
+                    return 0; // unhandled format: frontend duplicates last frame
+                }
+            }
+            sys->UnlockRect();
+            ok = 1;
+        }
+    }
+    if (sys) sys->Release();
+    bb->Release();
+    return ok;
+}
+
 OVERRIDE(IDirect3DDevice9, Present, 5) {
     static unsigned frame;
     static double t_last;
@@ -274,6 +324,20 @@ OVERRIDE(IDirect3DDevice9, Present, 5) {
             while (*p == ',') p++;
             if (!n) break;
         }
+    }
+    // libretro core: hand this frame to the frontend and pace the guest. Done
+    // before the window-presentable check so frames flow even with no real window.
+    if (wl_present_hook) {
+        IDirect3DSurface9 *bb = nullptr;
+        uint32_t w = 0, h = 0;
+        if (SUCCEEDED(dev->GetBackBuffer(0, 0, D3DBACKBUFFER_TYPE_MONO, &bb))) {
+            D3DSURFACE_DESC d;
+            bb->GetDesc(&d);
+            w = d.Width; h = d.Height;
+            bb->Release();
+        }
+        g_present_dev = dev;
+        wl_present_hook(d3d9_rt_read, w, h);
     }
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -470,6 +534,13 @@ static uint32_t g_movie_w, g_movie_h;
 void d3d9_movie_frame(const void *bgrx, uint32_t w, uint32_t h) {
     if (!g_device && d3d8_active()) { // D3D8 game (GTA III / Vice City)
         d3d8_movie_frame(bgrx, w, h);
+        return;
+    }
+    // libretro core: intro movies render on their own thread, outside the guest
+    // Present path. The decoded frame is already XRGB8888 (BGRA bytes), so stream
+    // it straight to the frontend; no window/GPU round-trip needed.
+    if (wl_submit_frame) {
+        wl_submit_frame((const uint32_t *)bgrx, w, h);
         return;
     }
     std::lock_guard<std::recursive_mutex> lk(g_lock);

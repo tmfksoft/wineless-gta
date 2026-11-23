@@ -181,6 +181,27 @@ void input_debug_frame(unsigned frame) {
     pthread_mutex_unlock(&in_lock);
 }
 
+// libretro core: drive a DirectInput key from the frontend's input. Sets the
+// DirectInput poll state (key_down) AND posts the window message on edges —
+// menus read WM_KEYDOWN/WM_KEYUP, gameplay polls GetDeviceState, so both are
+// needed. Called once per frame from retro_run with the current state; the
+// window queue is already cross-thread safe (the movie thread posts too).
+void wl_key_set(unsigned dik, int down) {
+    dik &= 0xff;
+    down = down ? 1 : 0;
+    static uint8_t prev[256];
+    if (prev[dik] == down) return; // edge-triggered
+    prev[dik] = down;
+    pthread_mutex_lock(&in_lock);
+    key_down[dik] = down ? 0x80 : 0;
+    pthread_mutex_unlock(&in_lock);
+    uint32_t vk = dik_to_vk(dik);
+    if (!vk) return;
+    uint32_t lp = 1 | ((dik & 0x7f) << 16) | (dik & 0x80 ? 0x01000000u : 0);
+    if (down) user32_post(user32_main_hwnd(), 0x0100 /*WM_KEYDOWN*/, vk, lp);
+    else      user32_post(user32_main_hwnd(), 0x0101 /*WM_KEYUP*/,  vk, lp | 0xC0000000u);
+}
+
 static int vk_down(uint32_t vk) {
     for (unsigned i = 0; i < NKEYS; i++) {
         uint8_t k = keymap[i].vk;

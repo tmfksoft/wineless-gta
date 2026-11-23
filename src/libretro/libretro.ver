@@ -1,0 +1,8 @@
+/* Export only the libretro C ABI; hide everything pulled in from the
+   DXVK/SDL3 static archives so the core can't interpose host symbols. */
+{
+  global:
+    retro_*;
+  local:
+    *;
+};

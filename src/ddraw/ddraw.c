@@ -763,6 +763,14 @@ static uint32_t dd_set_coop(uint32_t *a) {
     return DD_OK;
 }
 static uint32_t set_mode(uint32_t w, uint32_t h, uint32_t bpp) {
+    // Reject an implausible mode rather than resizing the render target to it.
+    // A game can compute a garbage resolution when it reads an uninitialised
+    // setting (e.g. a clean, config-less environment); passing it on corrupts the
+    // surface and, with a real windowing backend, triggers a failed mode switch.
+    if (w == 0 || h == 0 || w > 8192 || h > 8192) {
+        LOGI("ddraw: ignoring implausible SetDisplayMode %ux%u %u-bit", w, h, bpp);
+        return DD_OK;
+    }
     LOGI("ddraw: SetDisplayMode %ux%u %u-bit", w, h, bpp);
     mode_w = w;
     mode_h = h;

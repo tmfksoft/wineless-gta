@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "../win32/display.h"
+#include "../present_hook.h"
 
 extern "C" {
 void log_msg(int level, const char *fmt, ...);
@@ -92,6 +93,9 @@ void ddg_present(void) {
         while (*p == ',') p++;
         if (!n) break;
     }
+    // libretro core: read this frame back to CPU pixels, hand it to the frontend
+    // and block to pace the guest. (ddg_rt_read re-locks g_mx; it is recursive.)
+    if (wl_present_hook) wl_present_hook(ddg_rt_read, g_w, g_h);
     if (!wineless_window_presentable()) return;
     g_dev->Present(nullptr, nullptr, nullptr, nullptr);
 }
