@@ -5,6 +5,7 @@
 #include <d3d8.h>
 
 #include "../win32/display.h"
+#include "../present_hook.h"
 
 #include <cstdint>
 #include <cstdio>
@@ -239,6 +240,53 @@ static void debug_screenshot(IDirect3DDevice8 *dev, unsigned frame) {
     bb->Release();
 }
 
+// libretro core: read the current back buffer into an XRGB8888 CPU buffer.
+// D3D8 uses CreateImageSurface + CopyRects (there is no GetRenderTargetData).
+static int d3d8_rt_read(uint32_t *dst, uint32_t dst_pitch_px) {
+    IDirect3DDevice8 *dev = g_device;
+    if (!dev) return 0;
+    IDirect3DSurface8 *bb = nullptr, *img = nullptr;
+    if (FAILED(dev->GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, &bb))) return 0;
+    D3DSURFACE_DESC d;
+    bb->GetDesc(&d);
+    int ok = 0;
+    if (SUCCEEDED(dev->CreateImageSurface(d.Width, d.Height, d.Format, &img)) &&
+        SUCCEEDED(dev->CopyRects(bb, nullptr, 0, img, nullptr))) {
+        D3DLOCKED_RECT lr;
+        if (SUCCEEDED(img->LockRect(&lr, nullptr, D3DLOCK_READONLY))) {
+            for (uint32_t y = 0; y < d.Height; y++) {
+                const uint8_t *src = (const uint8_t *)lr.pBits + (size_t)y * lr.Pitch;
+                uint32_t *out = dst + (size_t)y * dst_pitch_px;
+                if (d.Format == D3DFMT_X8R8G8B8 || d.Format == D3DFMT_A8R8G8B8) {
+                    std::memcpy(out, src, (size_t)d.Width * 4);
+                } else if (d.Format == D3DFMT_R5G6B5) {
+                    const uint16_t *s = (const uint16_t *)src;
+                    for (uint32_t x = 0; x < d.Width; x++) {
+                        uint16_t p = s[x];
+                        uint32_t r = (p >> 11) & 0x1f, gg = (p >> 5) & 0x3f, b = p & 0x1f;
+                        out[x] = ((r << 3 | r >> 2) << 16) | ((gg << 2 | gg >> 4) << 8) | (b << 3 | b >> 2);
+                    }
+                } else if (d.Format == D3DFMT_X1R5G5B5 || d.Format == D3DFMT_A1R5G5B5) {
+                    const uint16_t *s = (const uint16_t *)src;
+                    for (uint32_t x = 0; x < d.Width; x++) {
+                        uint16_t p = s[x];
+                        uint32_t r = (p >> 10) & 0x1f, gg = (p >> 5) & 0x1f, b = p & 0x1f;
+                        out[x] = ((r << 3 | r >> 2) << 16) | ((gg << 3 | gg >> 2) << 8) | (b << 3 | b >> 2);
+                    }
+                } else {
+                    img->UnlockRect(); img->Release(); bb->Release();
+                    return 0;
+                }
+            }
+            img->UnlockRect();
+            ok = 1;
+        }
+    }
+    if (img) img->Release();
+    bb->Release();
+    return ok;
+}
+
 OVERRIDE(IDirect3DDevice8, Present, 5) {
     static unsigned frame;
     static double t_last;
@@ -250,6 +298,18 @@ OVERRIDE(IDirect3DDevice8, Present, 5) {
         if (n == frame) debug_screenshot(SELF(IDirect3DDevice8), frame);
         while (*p == ',') p++;
         if (!n) break;
+    }
+    // libretro core: hand this frame to the frontend and pace the guest.
+    if (wl_present_hook) {
+        IDirect3DSurface8 *bb = nullptr;
+        uint32_t w = 0, h = 0;
+        if (SUCCEEDED(SELF(IDirect3DDevice8)->GetBackBuffer(0, D3DBACKBUFFER_TYPE_MONO, &bb))) {
+            D3DSURFACE_DESC d;
+            bb->GetDesc(&d);
+            w = d.Width; h = d.Height;
+            bb->Release();
+        }
+        wl_present_hook(d3d8_rt_read, w, h);
     }
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);
@@ -346,6 +406,11 @@ OVERRIDE(IDirect3DVolume8, GetContainer, 3) { return get_container<IDirect3DVolu
 int d3d8_active(void) { return g_device != nullptr; }
 
 void d3d8_movie_frame(const void *bgrx, uint32_t w, uint32_t h) {
+    // libretro core: intro movie frame (already XRGB8888) — stream it directly.
+    if (wl_submit_frame) {
+        wl_submit_frame((const uint32_t *)bgrx, w, h);
+        return;
+    }
     std::lock_guard<std::recursive_mutex> lk(g_lock);
     IDirect3DDevice8 *dev = g_device;
     if (!dev || !wineless_window_presentable()) return;

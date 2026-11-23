@@ -173,28 +173,62 @@ void retro_get_system_av_info(struct retro_system_av_info *info) {
 void retro_set_controller_port_device(unsigned port, unsigned device) { (void)port; (void)device; }
 void retro_reset(void) {}
 
-// Map the RetroPad (port 0) onto the guest's DirectInput keyboard. This is a
-// menu-navigation / basic-movement MVP; a richer mapping (mouse look, full game
-// controls, native virtual gamepad) comes later.
+// Map the RetroPad (port 0) onto the guest's keyboard + mouse. Digital buttons
+// and the left stick drive movement/action keys; the right stick drives the
+// mouse (camera/aim); the triggers are the mouse buttons (fire/aim). This is a
+// sensible default for the GTA-era games (arrow-key movement, mouse look); the
+// exact key choices can be refined per game.
+//
+// DIK scancodes: Up C8 Down D0 Left CB Right CD, Enter 1C, Esc 01, Space 39,
+// LShift 2A, LCtrl 1D, Tab 0F, F 21.
+static int16_t joy(unsigned id)  { return input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, id); }
+static int16_t axis(unsigned idx, unsigned ax) {
+    return input_state_cb(0, RETRO_DEVICE_ANALOG, idx, ax);
+}
+
 static void poll_input(void) {
     if (!input_state_cb) return;
-    static const struct { unsigned id, dik; } map[] = {
-        { RETRO_DEVICE_ID_JOYPAD_UP,    0xC8 }, // Up arrow
-        { RETRO_DEVICE_ID_JOYPAD_DOWN,  0xD0 }, // Down arrow
-        { RETRO_DEVICE_ID_JOYPAD_LEFT,  0xCB }, // Left arrow
-        { RETRO_DEVICE_ID_JOYPAD_RIGHT, 0xCD }, // Right arrow
-        { RETRO_DEVICE_ID_JOYPAD_A,     0x1C }, // Enter (select)
-        { RETRO_DEVICE_ID_JOYPAD_START, 0x1C }, // Enter (start)
-        { RETRO_DEVICE_ID_JOYPAD_B,     0x01 }, // Esc (back)
-        { RETRO_DEVICE_ID_JOYPAD_X,     0x39 }, // Space
+
+    // ---- keys: digital buttons + left stick -> movement/action ----
+    static const struct { unsigned id; unsigned dik; } btn[] = {
+        { RETRO_DEVICE_ID_JOYPAD_UP,    0xC8 }, // Up
+        { RETRO_DEVICE_ID_JOYPAD_DOWN,  0xD0 }, // Down
+        { RETRO_DEVICE_ID_JOYPAD_LEFT,  0xCB }, // Left
+        { RETRO_DEVICE_ID_JOYPAD_RIGHT, 0xCD }, // Right
+        { RETRO_DEVICE_ID_JOYPAD_A,     0x1C }, // Enter  (select / enter-exit vehicle)
+        { RETRO_DEVICE_ID_JOYPAD_START, 0x1C }, // Enter  (menu start)
+        { RETRO_DEVICE_ID_JOYPAD_B,     0x39 }, // Space  (sprint / brake)
+        { RETRO_DEVICE_ID_JOYPAD_Y,     0x2A }, // LShift (jump)
+        { RETRO_DEVICE_ID_JOYPAD_X,     0x1D }, // LCtrl  (action/fire alt)
+        { RETRO_DEVICE_ID_JOYPAD_SELECT,0x01 }, // Esc    (back / pause)
+        { RETRO_DEVICE_ID_JOYPAD_L,     0x0F }, // Tab
+        { RETRO_DEVICE_ID_JOYPAD_R,     0x21 }, // F
     };
-    static const unsigned diks[] = { 0xC8, 0xD0, 0xCB, 0xCD, 0x1C, 0x01, 0x39 };
+    static const unsigned diks[] = { 0xC8,0xD0,0xCB,0xCD,0x1C,0x39,0x2A,0x1D,0x01,0x0F,0x21 };
     uint8_t want[256] = { 0 };
-    for (unsigned i = 0; i < sizeof map / sizeof *map; i++)
-        if (input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, map[i].id))
-            want[map[i].dik] = 1;
+    for (unsigned i = 0; i < sizeof btn / sizeof *btn; i++)
+        if (joy(btn[i].id)) want[btn[i].dik] = 1;
+
+    const int TH = 12000; // left-stick -> arrow threshold
+    int16_t lx = axis(RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X);
+    int16_t ly = axis(RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y);
+    if (lx < -TH) want[0xCB] = 1;  if (lx > TH) want[0xCD] = 1;
+    if (ly < -TH) want[0xC8] = 1;  if (ly > TH) want[0xD0] = 1;
+
     for (unsigned i = 0; i < sizeof diks / sizeof *diks; i++)
         wl_key_set(diks[i], want[diks[i]]);
+
+    // ---- right stick -> relative mouse (camera / aim) ----
+    const int DZ = 6000;
+    int16_t rx = axis(RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_X);
+    int16_t ry = axis(RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y);
+    int mdx = (rx > DZ || rx < -DZ) ? rx / 1800 : 0;
+    int mdy = (ry > DZ || ry < -DZ) ? ry / 1800 : 0;
+    if (mdx || mdy) wl_mouse_move(mdx, mdy);
+
+    // ---- triggers -> mouse buttons (R2/R = fire, L2/L already Tab/F above) ----
+    wl_mouse_button(0, joy(RETRO_DEVICE_ID_JOYPAD_R2) != 0);  // left = fire
+    wl_mouse_button(1, joy(RETRO_DEVICE_ID_JOYPAD_L2) != 0);  // right = aim
 }
 
 // ---- the core loop ----

@@ -39,6 +39,9 @@ int wl_audio_rate(void);
 // guest polls this state via GetDeviceState. Used by the core to drive the guest
 // from libretro input.
 void wl_key_set(unsigned dik, int down);
+// Relative mouse motion (camera/aim) and mouse buttons (0=L,1=R,2=M).
+void wl_mouse_move(int dx, int dy);
+void wl_mouse_button(int btn, int down);
 
 #ifdef __cplusplus
 }

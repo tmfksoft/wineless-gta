@@ -202,6 +202,22 @@ void wl_key_set(unsigned dik, int down) {
     else      user32_post(user32_main_hwnd(), 0x0101 /*WM_KEYUP*/,  vk, lp | 0xC0000000u);
 }
 
+// libretro core: accumulate a relative mouse motion (DirectInput reads and
+// clears mouse_dx/dy each poll). Used for camera / aim from the right stick.
+void wl_mouse_move(int dx, int dy) {
+    pthread_mutex_lock(&in_lock);
+    mouse_dx += dx;
+    mouse_dy += dy;
+    pthread_mutex_unlock(&in_lock);
+}
+// libretro core: set a mouse button (0=left, 1=right, 2=middle).
+void wl_mouse_button(int btn, int down) {
+    if (btn < 0 || btn >= 8) return;
+    pthread_mutex_lock(&in_lock);
+    mouse_btn[btn] = down ? 0x80 : 0;
+    pthread_mutex_unlock(&in_lock);
+}
+
 static int vk_down(uint32_t vk) {
     for (unsigned i = 0; i < NKEYS; i++) {
         uint8_t k = keymap[i].vk;
