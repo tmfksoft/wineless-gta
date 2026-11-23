@@ -395,6 +395,58 @@ API(user32, CharNextA, 1) { return STR(0)[0] ? ARG(0) + 1 : ARG(0); }
 API(user32, CharPrevA, 2) { return ARG(1) > ARG(0) ? ARG(1) - 1 : ARG(0); }
 API(user32, CharNextW, 1) { return WSTR(0)[0] ? ARG(0) + 2 : ARG(0); }
 API(user32, CharPrevW, 2) { return ARG(1) > ARG(0) ? ARG(1) - 2 : ARG(0); }
+// Char{Upper,Lower}{A,W}: Latin-1 case fold. These are polymorphic: when the
+// high word of the arg is zero it's a single char passed by value (return the
+// folded char), otherwise it's a pointer to a NUL-terminated string folded in
+// place (return the same pointer). Latin-1 range only, matching the ANSI CP.
+static uint8_t up8(uint8_t c) {
+    return ((c >= 'a' && c <= 'z') || (c >= 0xE0 && c <= 0xFE && c != 0xF7)) ? c - 32 : c;
+}
+static uint8_t lo8(uint8_t c) {
+    return ((c >= 'A' && c <= 'Z') || (c >= 0xC0 && c <= 0xDE && c != 0xD7)) ? c + 32 : c;
+}
+static uint16_t up16(uint16_t c) {
+    return ((c >= 'a' && c <= 'z') || (c >= 0xE0 && c <= 0xFE && c != 0xF7)) ? c - 32 : c;
+}
+static uint16_t lo16(uint16_t c) {
+    return ((c >= 'A' && c <= 'Z') || (c >= 0xC0 && c <= 0xDE && c != 0xD7)) ? c + 32 : c;
+}
+API(user32, CharUpperA, 1) {
+    if ((ARG(0) >> 16) == 0) return up8(ARG(0) & 0xFF);
+    for (char *s = PTR(0); *s; s++) *s = (char)up8((uint8_t)*s);
+    return ARG(0);
+}
+API(user32, CharLowerA, 1) {
+    if ((ARG(0) >> 16) == 0) return lo8(ARG(0) & 0xFF);
+    for (char *s = PTR(0); *s; s++) *s = (char)lo8((uint8_t)*s);
+    return ARG(0);
+}
+API(user32, CharUpperW, 1) {
+    if ((ARG(0) >> 16) == 0) return up16(ARG(0) & 0xFFFF);
+    for (uint16_t *s = PTR(0); *s; s++) *s = up16(*s);
+    return ARG(0);
+}
+API(user32, CharLowerW, 1) {
+    if ((ARG(0) >> 16) == 0) return lo16(ARG(0) & 0xFFFF);
+    for (uint16_t *s = PTR(0); *s; s++) *s = lo16(*s);
+    return ARG(0);
+}
+API(user32, CharUpperBuffA, 2) {
+    uint8_t *s = PTR(0);
+    for (uint32_t i = 0; i < ARG(1); i++) s[i] = up8(s[i]);
+    return ARG(1);
+}
+API(user32, CharLowerBuffA, 2) {
+    uint8_t *s = PTR(0);
+    for (uint32_t i = 0; i < ARG(1); i++) s[i] = lo8(s[i]);
+    return ARG(1);
+}
+API(user32, CharUpperBuffW, 2) {
+    uint16_t *s = PTR(0);
+    for (uint32_t i = 0; i < ARG(1); i++) s[i] = up16(s[i]);
+    return ARG(1);
+}
+// CharLowerBuffW defined below alongside the rect helpers.
 // LoadString: RT_STRING(6) resources are bundles of 16 length-prefixed UTF-16
 // strings; string `id` is the (id&15)th entry of bundle (id/16 + 1).
 static uint32_t load_string(uint32_t mod, uint32_t id, uint32_t buf, uint32_t max, bool wide) {
@@ -531,6 +583,17 @@ static uint32_t mouse_lparam(Window *w, float x, float y) {
 static void pump_sdl(void) {
     if (!nwindows || !windows[0].sdl) return;
     uint32_t hwnd = windows[0].hwnd;
+    // Our window is the foreground app at startup. Some games (Age of Empires)
+    // spin in their message loop without rendering until they receive
+    // WM_ACTIVATEAPP, and a compositor may never grant SDL keyboard focus (so no
+    // FOCUS_GAINED fires). Post the activation once, up front, so they proceed.
+    static bool activated;
+    if (!activated) {
+        activated = true;
+        post(hwnd, 0x001C /*WM_ACTIVATEAPP*/, 1, 0);
+        post(hwnd, 0x0006 /*WM_ACTIVATE*/, 1, 0);
+        post(hwnd, 0x0007 /*WM_SETFOCUS*/, 0, 0);
+    }
     SDL_Event e;
     while (SDL_PollEvent(&e)) {
         input_sdl_event(&e);
@@ -864,6 +927,8 @@ API(user32, EnumWindows, 2) {
 }
 API(user32, GetClassLongW, 2) { return 0; }
 API(user32, SetClassLongW, 3) { return 0; }
+API(user32, GetClassLongA, 2) { return 0; }
+API(user32, SetClassLongA, 3) { return 0; }
 API(user32, EnableWindow, 2) { return FALSE; }
 API(user32, GetGUIThreadInfo, 2) { return FALSE; }
 API(user32, GetLastInputInfo, 1) { ((uint32_t *)PTR(0))[1] = win32_tick_ms(); return TRUE; }
@@ -963,8 +1028,7 @@ API(user32, OffsetRect, 3) {
 }
 API(user32, CharLowerBuffW, 2) {
     uint16_t *s = PTR(0);
-    for (uint32_t i = 0; i < ARG(1); i++)
-        if ((s[i] >= 'A' && s[i] <= 'Z') || (s[i] >= 0xC0 && s[i] <= 0xDE && s[i] != 0xD7)) s[i] += 32;
+    for (uint32_t i = 0; i < ARG(1); i++) s[i] = lo16(s[i]);
     return ARG(1);
 }
 API(user32, MapVirtualKeyW, 2) { return api_user32_MapVirtualKeyA(_args); }

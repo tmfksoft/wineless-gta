@@ -30,7 +30,16 @@
 #define MEM_IMAGE 0x1000000
 #define MEM_TOP_DOWN 0x100000
 
-enum { LM_TAG_NONE, LM_TAG_VIRTUAL, LM_TAG_IMAGE, LM_TAG_HEAPSLAB, LM_TAG_HEAPLARGE, LM_TAG_SYSTEM, LM_TAG_STACK };
+enum {
+    LM_TAG_NONE,
+    LM_TAG_VIRTUAL,
+    LM_TAG_IMAGE,
+    LM_TAG_HEAPSLAB,
+    LM_TAG_HEAPLARGE,
+    LM_TAG_SYSTEM,
+    LM_TAG_STACK,
+    LM_TAG_MAPPED, // file-mapping views (MapViewOfFile): freed only by UnmapViewOfFile
+};
 
 void lm_init(void);
 // Data Execution Prevention as the exe asks for (DllCharacteristics NX_COMPAT).

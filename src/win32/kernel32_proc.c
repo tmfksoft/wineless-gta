@@ -391,6 +391,15 @@ API(kernel32, VirtualAlloc, 4) {
     return r;
 }
 API(kernel32, VirtualFree, 3) {
+    // MEM_DECOMMIT/MEM_RELEASE only operate on VirtualAlloc'd memory. Windows
+    // rejects them (ERROR_INVALID_PARAMETER) and leaves memory intact otherwise;
+    // some CRTs (VC6 small-block heap) call VirtualFree on plain heap pointers
+    // and rely on that no-op, so decommitting anything else would destroy live
+    // data (e.g. AoE's loaded SLP sprite buffers).
+    if (lm_tag(ARG(0)) != LM_TAG_VIRTUAL) {
+        set_last_error(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
     if (ARG(2) & MEM_RELEASE) return lm_release(ARG(0));
     if (ARG(2) & MEM_DECOMMIT) return lm_decommit(ARG(0), ARG(1));
     return FALSE;

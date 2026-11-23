@@ -101,3 +101,42 @@ API(ws2_32, WSARecv, 7) { return SOCKET_ERROR; }
 API(ws2_32, WSARecvFrom, 9) { return SOCKET_ERROR; }
 API(ws2_32, WSASend, 7) { return SOCKET_ERROR; }
 API(ws2_32, WSASendTo, 9) { return SOCKET_ERROR; }
+
+// ---------------------------------------------------------------- msvfw32 (Video for Windows)
+// We have no AVI/codec stack, so report "no codec installed": games (AoE) fall
+// back to skipping intro cinematics rather than crashing.
+API(msvfw32, ICInfo, 3) { return FALSE; }         // no compressor of this type
+API(msvfw32, ICOpen, 3) { return 0; }             // NULL HIC
+API(msvfw32, ICClose, 1) { return 0; }
+API(msvfw32, ICGetInfo, 3) { return 0; }
+API(msvfw32, ICSendMessage, 4) { return 0xFFFFFFFFu; } // ICERR_UNSUPPORTED
+API(msvfw32, ICLocate, 6) { return 0; }
+API(msvfw32, MCIWndCreateA, 5) { return 0; }      // no media window
+API(msvfw32, MCIWndCreateW, 5) { return 0; }
+
+// ---------------------------------------------------------------- dplayx (DirectPlay)
+// Multiplayer networking is unsupported; report DirectPlay unavailable so games
+// fall back to single-player instead of crashing. Imported by ordinal.
+#define DPERR_UNAVAILABLE 0x80004005u // E_FAIL - DirectPlay not available
+API_ORD(dplayx, DirectPlayCreate, 1, 3) { return DPERR_UNAVAILABLE; }
+API_ORD(dplayx, DirectPlayEnumerate, 2, 2) { return DPERR_UNAVAILABLE; }
+API_ORD(dplayx, DirectPlayLobbyCreateW, 3, 5) { return DPERR_UNAVAILABLE; }
+API_ORD(dplayx, DirectPlayLobbyCreateA, 4, 5) { return DPERR_UNAVAILABLE; }
+
+// ---------------------------------------------------------------- winmm MCI / mmio
+// MCI drives CD-audio background music; we have no CD, so commands fail quietly
+// and the game runs without music. mmio (RIFF/WAV reader) is likewise absent.
+API(winmm, mciSendCommandA, 4) { return 1; }  // MCIERR_* (non-zero = failure)
+API(winmm, mciSendStringA, 4) { return 1; }
+API(winmm, mciGetErrorStringA, 3) {
+    if (ARG(1) && ARG(2)) *(char *)PTR(1) = 0;
+    return FALSE;
+}
+API(winmm, mmioOpenA, 3) { return 0; }        // NULL HMMIO
+API(winmm, mmioClose, 2) { return 0; }
+API(winmm, mmioRead, 3) { return 0xFFFFFFFFu; }
+API(winmm, mmioGetInfo, 3) { return 0xFFFFFFFFu; }   // MMSYSERR
+API(winmm, mmioSetInfo, 3) { return 0xFFFFFFFFu; }
+API(winmm, mmioAdvance, 3) { return 0xFFFFFFFFu; }
+API(winmm, mmioDescend, 4) { return 0xFFFFFFFFu; }
+API(winmm, mmioAscend, 3) { return 0xFFFFFFFFu; }

@@ -219,6 +219,80 @@ API(kernel32, SetEndOfFile, 1) {
     return ftruncate(o->file.fd, cur) == 0;
 }
 
+// ---- legacy 16-bit-origin file API (OpenFile family) ----------------------
+// AoE and other late-90s titles open files with CreateFile but read/seek/close
+// them with these. On Win32 an HFILE is just a file HANDLE, so they map onto
+// the same OBJ_FILE handles. HFILE_ERROR is -1; our handles are never -1.
+#define HFILE_ERROR 0xFFFFFFFFu
+// OpenFile/_lopen style bits: low 2 = OF_READ(0)/OF_WRITE(1)/OF_READWRITE(2).
+#define OF_WRITE 0x0001
+#define OF_READWRITE 0x0002
+#define OF_CREATE 0x1000
+#define OF_EXIST 0x4000
+#define OF_DELETE 0x0200
+static uint32_t lopen_access(uint32_t style) {
+    uint32_t rw = style & 0x3;
+    if (rw == OF_WRITE) return GENERIC_WRITE;
+    if (rw == OF_READWRITE) return GENERIC_READ | GENERIC_WRITE;
+    return GENERIC_READ;
+}
+API(kernel32, _lopen, 2) { return create_file(STR(0), lopen_access(ARG(1)), OPEN_EXISTING, 0); }
+API(kernel32, _lcreat, 2) {
+    // iAttribute bit 0 = read-only; otherwise create/truncate read-write.
+    return create_file(STR(0), GENERIC_READ | GENERIC_WRITE, CREATE_ALWAYS, 0);
+}
+// OpenFile(name, OFSTRUCT*, style): fills szPathName@4..131, cBytes@0. OF_EXIST
+// just tests existence (open then close); OF_DELETE unlinks; OF_PARSE only fills
+// the struct. Otherwise open per the access bits.
+API(kernel32, OpenFile, 3) {
+    uint8_t *of = PTR(1);
+    if (of) {
+        memset(of, 0, 136);
+        of[0] = 136;         // cBytes
+        of[1] = 1;           // fFixedDisk
+        snprintf((char *)of + 4, 128, "%s", STR(0));
+    }
+    uint32_t style = ARG(2);
+    if (style & OF_DELETE) {
+        char host[PATH_MAX];
+        if (vfs_to_host(STR(0), host, sizeof host) && unlink(host) == 0) { vfs_note_deleted(host); return 0; }
+        return HFILE_ERROR;
+    }
+    uint32_t disp = (style & OF_CREATE) ? CREATE_ALWAYS : OPEN_EXISTING;
+    uint32_t h = create_file(STR(0), lopen_access(style), disp, 0);
+    if (style & (OF_EXIST | 0x0100 /*OF_PARSE*/)) { // test-only: close and report
+        if (h == INVALID_HANDLE_VALUE) return HFILE_ERROR;
+        handle_close(h);
+        return (style & OF_EXIST) ? 0 : h;
+    }
+    return h == INVALID_HANDLE_VALUE ? HFILE_ERROR : h;
+}
+API(kernel32, _lread, 3) {
+    Object *o = file_obj(ARG(0));
+    if (!o) return HFILE_ERROR;
+    ssize_t r = read(o->file.fd, PTR(1), ARG(2));
+    if (r < 0) { set_last_error(win32_errno(errno)); return HFILE_ERROR; }
+    return (uint32_t)r;
+}
+API(kernel32, _hread, 3) { return api_kernel32__lread(_args); }
+API(kernel32, _lwrite, 3) {
+    Object *o = file_obj(ARG(0));
+    if (!o) return HFILE_ERROR;
+    ssize_t r = write(o->file.fd, PTR(1), ARG(2));
+    if (r < 0) { set_last_error(win32_errno(errno)); return HFILE_ERROR; }
+    return (uint32_t)r;
+}
+API(kernel32, _hwrite, 3) { return api_kernel32__lwrite(_args); }
+API(kernel32, _llseek, 3) {
+    Object *o = file_obj(ARG(0));
+    if (!o) return HFILE_ERROR;
+    static const int wh[] = {SEEK_SET, SEEK_CUR, SEEK_END};
+    off_t r = lseek(o->file.fd, (off_t)(int32_t)ARG(1), wh[ARG(2) % 3]);
+    if (r < 0) { set_last_error(win32_errno(errno)); return HFILE_ERROR; }
+    return (uint32_t)r;
+}
+API(kernel32, _lclose, 1) { return handle_close(ARG(0)) ? 0 : HFILE_ERROR; }
+
 API(kernel32, DeleteFileA, 1) {
     char host[PATH_MAX];
     if (!vfs_to_host(STR(0), host, sizeof host)) { set_last_error(ERROR_PATH_NOT_FOUND); return FALSE; }
@@ -490,7 +564,12 @@ API(kernel32, MapViewOfFile, 5) {
         struct stat st;
         size = o->mapping.fd >= 0 && !fstat(o->mapping.fd, &st) ? (uint32_t)(st.st_size - off) : o->mapping.size;
     }
-    uint32_t va = lm_reserve(0, size, LM_GRAN, LM_TAG_VIRTUAL, false);
+    // LM_TAG_MAPPED (not VIRTUAL) so VirtualFree won't decommit a view: on Windows
+    // mapped views are freed only by UnmapViewOfFile, and VirtualFree(MEM_DECOMMIT)
+    // on one fails harmlessly. AoE memory-maps its DRS archives and then calls
+    // VirtualFree(MEM_DECOMMIT) on sprite pointers inside a view; decommitting those
+    // would unmap live file data and crash when the sprite is read.
+    uint32_t va = lm_reserve(0, size, LM_GRAN, LM_TAG_MAPPED, false);
     if (!va) return 0;
     if (o->mapping.fd >= 0) {
         int prot = (ARG(1) & 2) ? PROT_READ | PROT_WRITE : PROT_READ;
@@ -501,6 +580,7 @@ API(kernel32, MapViewOfFile, 5) {
     } else {
         lm_commit(va, size, PAGE_READWRITE);
     }
+    LOGD("MapViewOfFile(h=0x%x off=0x%llx sz=0x%x) = 0x%x", ARG(0), (unsigned long long)off, size, va);
     return va;
 }
 API(kernel32, UnmapViewOfFile, 1) { return lm_release(ARG(0)); }
