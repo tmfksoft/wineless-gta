@@ -10,9 +10,23 @@
 
 typedef struct Asar Asar;
 
-// Open and index an .asar. NULL on failure.
+// Open and index an .asar. Transparently handles a *bundle* — an .asar appended
+// to a binary with a footer (see asar_make_bundle) — by reading the archive at
+// the footer's offset. NULL on failure.
 Asar *asar_open(const char *path);
 void  asar_close(Asar *a);
+
+// True if `path` carries an appended-asar footer (i.e. it is a bundle).
+int asar_is_bundle(const char *path);
+
+// Build a self-contained bundle: base_bin + the game's asar + a locator footer,
+// written to `out` (made executable). `game` may be a directory (packed first)
+// or an existing .asar. Returns 0 on success.
+int asar_make_bundle(const char *base_bin, const char *game, const char *out);
+
+// Read a whole entry (e.g. "wineless.config") into buf. Returns its length, or
+// -1 if absent. Convenience over asar_open/asar_stat for small config files.
+long asar_read_whole(const char *path, const char *relpath, char *buf, size_t cap);
 
 // The archive's own fd, for pread()/mmap() by callers. -1 if closed.
 int asar_fd(const Asar *a);

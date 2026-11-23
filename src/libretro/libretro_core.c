@@ -14,9 +14,11 @@
 // wineless-gta executable does not include this file.
 
 #include "libretro.h"
+#include "../asar.h"
 #include "../present_hook.h"
 #include "../wl_boot.h"
 
+#include <dlfcn.h>
 #include <errno.h>
 #include <libgen.h>
 #include <pthread.h>
@@ -286,7 +288,14 @@ bool retro_load_game(const struct retro_game_info *game) {
 
     // Derive game dir + exe from --game <path/to/game.exe>; else wl_boot_game
     // falls back to $WINELESS_GAME_DIR / $WINELESS_EXE / cwd.
-    if (game && game->path && game->path[0]) {
+    // Self-contained bundle: this .so has a game appended (see --make-bundle).
+    // Boot from the .so itself, no --game needed.
+    Dl_info info;
+    if (dladdr((void *)retro_load_game, &info) && info.dli_fname && asar_is_bundle(info.dli_fname)) {
+        snprintf(g_game_dir, sizeof g_game_dir, "%s", info.dli_fname);
+        g_exe_name[0] = 0;
+        LOGI("libretro: self-contained bundle %s", info.dli_fname);
+    } else if (game && game->path && game->path[0]) {
         const char *p = game->path;
         size_t l = strlen(p);
         if (l > 5 && strcasecmp(p + l - 5, ".asar") == 0) {

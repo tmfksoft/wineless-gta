@@ -184,12 +184,14 @@ void vfs_init(const char *game_dir, const char *user_dir, const char *data_dir) 
     snprintf(steam, sizeof steam, "%s/.steam/root/legacycompat", home ? home : "");
     if (realpath(steam, real)) add_mount(VFS_STEAM_VDIR, real, true);
 
-    // An .asar game dir is served from the archive: PE images (exe/dll) are
-    // extracted to a temp dir (the loader needs real files); everything else is
-    // read from the archive by the file layer.
+    // An .asar game dir (or a bundle: this binary with an .asar appended) is
+    // served from the archive: PE images (exe/dll) are extracted to a temp dir
+    // (the loader needs real files); everything else is read from the archive.
     struct stat gst;
-    if (strlen(game_dir) > 5 && !strcasecmp(game_dir + strlen(game_dir) - 5, ".asar") &&
-        !stat(game_dir, &gst) && S_ISREG(gst.st_mode)) {
+    size_t gdl = strlen(game_dir);
+    bool game_is_asar = !stat(game_dir, &gst) && S_ISREG(gst.st_mode) &&
+                        ((gdl > 5 && !strcasecmp(game_dir + gdl - 5, ".asar")) || asar_is_bundle(game_dir));
+    if (game_is_asar) {
         Asar *a = asar_open(game_dir);
         if (!a) fatal("vfs: cannot open asar %s", game_dir);
         char code_dir[PATH_MAX];

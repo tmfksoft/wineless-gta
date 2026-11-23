@@ -366,6 +366,42 @@ static void load_config(Config *c) {
     fclose(f);
 }
 
+// Apply a wineless.config found at the root of a bundled .asar. Lowest precedence:
+// every setenv uses overwrite=0, so a real env var (or anything set by the
+// operator) wins. Only exe/display and WINELESS_*/DXVK_*/SDL_* env keys are
+// honoured; game-dir/user-dir and arbitrary host env vars are ignored, so a
+// packaged game can't influence the host process environment.
+static void apply_bundle_config(const char *self) {
+    char buf[8192];
+    long n = asar_read_whole(self, "wineless.config", buf, sizeof buf - 1);
+    if (n < 0) return;
+    buf[n] = 0;
+    LOGI("config: wineless.config from bundle");
+    char *save = NULL;
+    for (char *line = strtok_r(buf, "\r\n", &save); line; line = strtok_r(NULL, "\r\n", &save)) {
+        char *key = line;
+        while (isspace((unsigned char)*key)) key++;
+        if (*key == '#' || *key == ';' || !*key) continue;
+        char *eq = strchr(key, '=');
+        if (!eq) continue;
+        char *val = eq + 1;
+        for (char *e = eq; e > key && isspace((unsigned char)e[-1]);) *--e = 0;
+        *eq = 0;
+        while (isspace((unsigned char)*val)) val++;
+        for (char *e = val + strlen(val); e > val && isspace((unsigned char)e[-1]);) *--e = 0;
+        size_t vl = strlen(val);
+        if (vl >= 2 && (*val == '"' || *val == '\'') && val[vl - 1] == *val) { val[vl - 1] = 0; val++; }
+        if (!*key) continue;
+        if (!strcasecmp(key, "exe")) setenv("WINELESS_EXE", val, 0);
+        else if (!strcasecmp(key, "display")) setenv("WINELESS_DISPLAY", val, 0);
+        else if (!strcasecmp(key, "game-dir") || !strcasecmp(key, "game_dir")) {} // the asar IS the game
+        else if (!strcasecmp(key, "user-dir") || !strcasecmp(key, "user_dir")) {} // host-specific
+        else if (!strncasecmp(key, "WINELESS_", 9) || !strncasecmp(key, "DXVK_", 5) || !strncasecmp(key, "SDL_", 4))
+            setenv(key, val, 0);
+        // else: ignored — no arbitrary host env injection from a packaged game
+    }
+}
+
 // --save: write the resolved parameters to ./wineless.config so a later bare
 // run (or a drop-in launch) reuses them. Keys match load_config's.
 static int save_config(const char *exe, const char *game_dir, const char *user_dir) {
@@ -401,7 +437,39 @@ int main(int argc, char **argv) {
     // Debug: dump an .asar's index, and optionally hexdump the head of one entry.
     //   wineless-gta --asar-list <file.asar> [relpath-to-read]
     if (argc >= 3 && !strcmp(argv[1], "--asar-list")) return asar_debug_list(argv[2], argc > 3 ? argv[3] : NULL);
+    // Build a self-contained bundle (engine + game + locator footer):
+    //   wineless-gta --make-bundle [base-binary] <game-dir|.asar> <out>
+    // base-binary defaults to this executable; pass wineless_libretro.so to make
+    // a self-contained core. Running the bundle boots the embedded game.
+    if (argc >= 3 && !strcmp(argv[1], "--make-bundle")) {
+        const char *base, *game, *out;
+        if (argc == 5) { base = argv[2]; game = argv[3]; out = argv[4]; }
+        else if (argc == 4) {
+            static char self[PATH_MAX];
+            ssize_t l = readlink("/proc/self/exe", self, sizeof self - 1);
+            if (l <= 0) { fprintf(stderr, "cannot find self\n"); return 1; }
+            self[l] = 0; base = self; game = argv[2]; out = argv[3];
+        } else { fprintf(stderr, "usage: --make-bundle [base] <game-dir|.asar> <out>\n"); return 1; }
+        int rc = asar_make_bundle(base, game, out);
+        if (!rc) fprintf(stderr, "wineless-gta: bundled %s + %s -> %s\n", base, game, out);
+        return rc ? 1 : 0;
+    }
     log_init();
+    // Self-contained bundle: this binary has an .asar appended (see --make-bundle).
+    // Apply its wineless.config and boot the embedded game.
+    {
+        char self[PATH_MAX];
+        ssize_t l = readlink("/proc/self/exe", self, sizeof self - 1);
+        if (l > 0) {
+            self[l] = 0;
+            if (asar_is_bundle(self)) {
+                LOGI("bundle: booting embedded game from %s", self);
+                // wl_boot_game applies the bundle's wineless.config; a real
+                // WINELESS_EXE env var (passed here) still overrides exe=.
+                return wl_boot_game(self, getenv("WINELESS_EXE"), NULL);
+            }
+        }
+    }
     char steam_game_dir[PATH_MAX] = "";
     int vr = steam_verb(&argc, &argv, steam_game_dir, sizeof steam_game_dir);
     if (vr >= 0) return vr;
@@ -557,14 +625,18 @@ int wl_boot_game(const char *game_dir_in, const char *exe_name, const char *user
     char real[PATH_MAX];
     if (realpath(game_dir, real)) snprintf(game_dir, sizeof game_dir, "%s", real);
 
-    // Game packed as an .asar: detect the exe from the archive (vfs_init extracts
-    // it), set the per-game folder, and boot. The exe is resolved from the VFS.
+    // Game packed as an .asar (or appended to this binary as a bundle): detect the
+    // exe from the archive (vfs_init extracts it), set the per-game folder, boot.
     size_t gl = strlen(game_dir);
-    if (gl > 5 && !strcasecmp(game_dir + gl - 5, ".asar")) {
+    bool is_asar = (gl > 5 && !strcasecmp(game_dir + gl - 5, ".asar")) || asar_is_bundle(game_dir);
+    if (is_asar) {
+        if (asar_is_bundle(game_dir)) apply_bundle_config(game_dir); // exe/display/env (lowest precedence)
         if (!g_exe_name) {
+            const char *envx = getenv("WINELESS_EXE");
             static char ebuf[256];
-            if (!asar_find_exe(game_dir, ebuf, sizeof ebuf)) { LOGE("no .exe in %s", game_dir); return 1; }
-            g_exe_name = ebuf;
+            if (envx && *envx) g_exe_name = strdup(envx);
+            else if (asar_find_exe(game_dir, ebuf, sizeof ebuf)) g_exe_name = ebuf;
+            else { LOGE("no .exe in %s", game_dir); return 1; }
         }
         g_is_gtasa = !strcasecmp(g_exe_name, "gta_sa.exe");
         LOGI("game (asar): %s", g_exe_name);

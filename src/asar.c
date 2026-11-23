@@ -156,22 +156,52 @@ static void parse_node(Asar *a, Jp *j, const char *path) {
 
 // ---------------------------------------------------------------- open / query
 
+// A bundle is "<binary><asar><footer>"; the footer lets us find the asar start.
+#define WL_BUNDLE_MAGIC "WLASARv1" // 8 bytes
+#define WL_FOOTER_SIZE  24         // u64 asar_offset, u64 asar_size, 8-byte magic
+
+// If `fd` ends with a bundle footer, return the embedded asar's byte offset;
+// else 0 (a plain .asar reads from offset 0).
+static uint64_t bundle_base(int fd) {
+    struct stat st;
+    if (fstat(fd, &st) != 0 || st.st_size < WL_FOOTER_SIZE) return 0;
+    uint8_t f[WL_FOOTER_SIZE];
+    if (pread(fd, f, WL_FOOTER_SIZE, st.st_size - WL_FOOTER_SIZE) != WL_FOOTER_SIZE) return 0;
+    if (memcmp(f + 16, WL_BUNDLE_MAGIC, 8) != 0) return 0;
+    uint64_t off, size;
+    memcpy(&off, f, 8);
+    memcpy(&size, f + 8, 8);
+    if (off + size + WL_FOOTER_SIZE > (uint64_t)st.st_size) return 0; // sanity
+    return off;
+}
+
+int asar_is_bundle(const char *path) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC);
+    if (fd < 0) return 0;
+    uint64_t b = bundle_base(fd);
+    close(fd);
+    return b != 0;
+}
+
 Asar *asar_open(const char *path) {
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd < 0) return NULL;
+    uint64_t base = bundle_base(fd); // 0 for a plain .asar
     uint8_t pre[16];
-    if (pread(fd, pre, 16, 0) != 16) { close(fd); return NULL; }
+    if (pread(fd, pre, 16, (off_t)base) != 16) { close(fd); return NULL; }
     // Pickle preamble: [u32 4][u32 P][u32 P][u32 jsonLen], json at 16, data after.
     uint32_t json_len;
     memcpy(&json_len, pre + 12, 4);
     if (json_len == 0 || json_len > (64u << 20)) { close(fd); return NULL; }
     char *json = malloc(json_len + 1);
-    if (pread(fd, json, json_len, 16) != (ssize_t)json_len) { free(json); close(fd); return NULL; }
+    if (pread(fd, json, json_len, (off_t)base + 16) != (ssize_t)json_len) { free(json); close(fd); return NULL; }
     json[json_len] = 0;
+    // Sanity: the header is a directory node (prevents a bogus footer match).
+    if (strncmp(json, "{\"files\":{", 10) != 0) { free(json); close(fd); return NULL; }
 
     Asar *a = calloc(1, sizeof *a);
     a->fd = fd;
-    a->data_start = 16 + align_up(json_len, 4);
+    a->data_start = base + 16 + align_up(json_len, 4);
     Jp j = { json, json + json_len };
     // The top node is { "files": { ... } }
     parse_node(a, &j, "");
@@ -351,6 +381,80 @@ int asar_pack(const char *srcdir, const char *outpath) {
     for (size_t i = 0; i < fl.n; i++) free(fl.paths[i]);
     free(fl.paths); free(fl.offs);
     return ok ? 0 : 3;
+}
+
+long asar_read_whole(const char *path, const char *relpath, char *buf, size_t cap) {
+    Asar *a = asar_open(path);
+    if (!a) return -1;
+    uint64_t off, size; int isdir;
+    long r = -1;
+    if (asar_stat(a, relpath, &off, &size, &isdir) && !isdir) {
+        size_t n = size < cap ? (size_t)size : cap;
+        ssize_t got = pread(a->fd, buf, n, (off_t)off);
+        r = got < 0 ? -1 : (long)got;
+    }
+    asar_close(a);
+    return r;
+}
+
+// ---------------------------------------------------------------- bundle maker
+
+static int copy_fd(int src, int dst) {
+    char b[1 << 16];
+    ssize_t r;
+    while ((r = read(src, b, sizeof b)) > 0)
+        if (write(dst, b, r) != r) return -1;
+    return r < 0 ? -1 : 0;
+}
+
+int asar_make_bundle(const char *base_bin, const char *game, const char *out) {
+    char tmp[4096];
+    const char *asar_path;
+    int made_tmp = 0;
+    size_t gl = strlen(game);
+    struct stat gst;
+    if (gl > 5 && strcasecmp(game + gl - 5, ".asar") == 0) {
+        asar_path = game;
+    } else if (stat(game, &gst) == 0 && S_ISDIR(gst.st_mode)) {
+        snprintf(tmp, sizeof tmp, "%s.pack.asar", out);
+        if (asar_pack(game, tmp) != 0) { fprintf(stderr, "asar: packing %s failed\n", game); return 1; }
+        asar_path = tmp;
+        made_tmp = 1;
+    } else {
+        fprintf(stderr, "asar: %s is not a directory or .asar\n", game);
+        return 1;
+    }
+
+    int rc = 1;
+    int bi = open(base_bin, O_RDONLY | O_CLOEXEC);
+    int oo = open(out, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0755);
+    int ai = open(asar_path, O_RDONLY | O_CLOEXEC);
+    if (bi >= 0 && oo >= 0 && ai >= 0 && copy_fd(bi, oo) == 0) {
+        off_t base_size = lseek(oo, 0, SEEK_CUR);
+        // Pad to a 4K boundary so the embedded asar's (already 4K-aligned) data
+        // stays page-aligned in the bundle — keeps MapViewOfFile zero-copy.
+        off_t pad = (DATA_ALIGN - (base_size % DATA_ALIGN)) % DATA_ALIGN;
+        if (pad) {
+            static const char z[DATA_ALIGN] = { 0 };
+            if (write(oo, z, pad) == pad) base_size += pad;
+        }
+        struct stat ast;
+        fstat(ai, &ast);
+        if (copy_fd(ai, oo) == 0) {
+            uint8_t f[WL_FOOTER_SIZE];
+            uint64_t off = (uint64_t)base_size, size = (uint64_t)ast.st_size;
+            memcpy(f, &off, 8);
+            memcpy(f + 8, &size, 8);
+            memcpy(f + 16, WL_BUNDLE_MAGIC, 8);
+            if (write(oo, f, WL_FOOTER_SIZE) == WL_FOOTER_SIZE) rc = 0;
+        }
+    }
+    if (bi >= 0) close(bi);
+    if (oo >= 0) close(oo);
+    if (ai >= 0) close(ai);
+    if (made_tmp) unlink(tmp);
+    if (rc == 0) chmod(out, 0755);
+    return rc;
 }
 
 // ---------------------------------------------------------------- debug
