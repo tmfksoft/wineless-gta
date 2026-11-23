@@ -442,6 +442,12 @@ int main(int argc, char **argv) {
     if (!*game_dir) getcwd(game_dir, sizeof game_dir);
     char real[PATH_MAX];
     if (realpath(game_dir, real)) snprintf(game_dir, sizeof game_dir, "%s", real);
+    // A game packed as an .asar: delegate to the shared asar-aware boot path.
+    {
+        size_t gl = strlen(game_dir);
+        if (gl > 5 && !strcasecmp(game_dir + gl - 5, ".asar"))
+            return wl_boot_game(game_dir, g_exe_name, *user_dir ? user_dir : NULL);
+    }
     if (!find_exe(game_dir, exe, sizeof exe)) {
         if (g_exe_name) LOGE("%s not found in %s", g_exe_name, game_dir);
         else LOGE("no usable GTA III / Vice City / San Andreas exe in %s", game_dir);
@@ -522,7 +528,11 @@ int wl_boot_game_resolved(const char *game_dir, const char *exe_host, const char
     cpu_start_watchdog();
     char vexe[512];
     snprintf(vexe, sizeof vexe, "%s\\%s", VFS_GAME_VDIR, g_exe_name);
-    if (!pe_load_exe(exe_host, vexe, &g_exe)) return 1;
+    // Resolve the exe through the VFS: for a normal dir this is game_dir/exe; for
+    // an .asar it's the copy extracted to the temp code dir by vfs_init.
+    char exe_real[PATH_MAX];
+    const char *exe_path = vfs_to_host(vexe, exe_real, sizeof exe_real) ? exe_real : exe_host;
+    if (!pe_load_exe(exe_path, vexe, &g_exe)) return 1;
     *(uint32_t *)G2H(g_peb + 0x08) = g_exe.base; // PEB.ImageBaseAddress
 
     LOGI("starting game (cmdline: %s)", cmdline);
@@ -546,6 +556,28 @@ int wl_boot_game(const char *game_dir_in, const char *exe_name, const char *user
     if (!*game_dir) getcwd(game_dir, sizeof game_dir);
     char real[PATH_MAX];
     if (realpath(game_dir, real)) snprintf(game_dir, sizeof game_dir, "%s", real);
+
+    // Game packed as an .asar: detect the exe from the archive (vfs_init extracts
+    // it), set the per-game folder, and boot. The exe is resolved from the VFS.
+    size_t gl = strlen(game_dir);
+    if (gl > 5 && !strcasecmp(game_dir + gl - 5, ".asar")) {
+        if (!g_exe_name) {
+            static char ebuf[256];
+            if (!asar_find_exe(game_dir, ebuf, sizeof ebuf)) { LOGE("no .exe in %s", game_dir); return 1; }
+            g_exe_name = ebuf;
+        }
+        g_is_gtasa = !strcasecmp(g_exe_name, "gta_sa.exe");
+        LOGI("game (asar): %s", g_exe_name);
+        if (strcasestr(g_exe_name, "gta3")) g_user_subdir = "GTA3 User Files";
+        else if (strcasestr(g_exe_name, "vc") || strcasestr(g_exe_name, "vice")) g_user_subdir = "GTA Vice City User Files";
+        if (!*user_dir) {
+            char docs[PATH_MAX];
+            documents_dir(docs, sizeof docs);
+            snprintf(user_dir, sizeof user_dir, "%s/%s", docs, g_user_subdir);
+        }
+        return wl_boot_game_resolved(game_dir, "", user_dir, NULL);
+    }
+
     if (!find_exe(game_dir, exe, sizeof exe)) {
         if (g_exe_name) LOGE("%s not found in %s", g_exe_name, game_dir);
         else LOGE("no usable game exe in %s", game_dir);

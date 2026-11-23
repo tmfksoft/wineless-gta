@@ -468,3 +468,42 @@ uint32_t pad_getobjectinfo(PadDev *p, uint8_t *o, uint32_t obj, uint32_t how) {
 
 void pad_getinfo(PadDev *p, uint8_t *di) { pad_instance(p->index, di); }
 int pad_connected(PadDev *p) { return p->pad && SDL_GamepadConnected(p->pad); }
+
+// winmm legacy joystick: read the first connected gamepad (including the core's
+// virtual pad) into winmm's 0..65535 axis range. Returns 1 if a pad is present.
+int wl_joy_read(uint32_t axes[6], uint32_t *buttons, uint32_t *pov) {
+    static SDL_Gamepad *gp;
+    if (!gp || !SDL_GamepadConnected(gp)) {
+        int n = 0;
+        SDL_JoystickID *ids = SDL_GetGamepads(&n);
+        gp = (ids && n > 0) ? SDL_OpenGamepad(ids[0]) : NULL;
+        if (ids) SDL_free(ids);
+    }
+    if (!gp) return 0;
+    SDL_UpdateGamepads();
+    int16_t lx = SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_LEFTX);
+    int16_t ly = SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_LEFTY);
+    int16_t rx = SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_RIGHTX);
+    int16_t ry = SDL_GetGamepadAxis(gp, SDL_GAMEPAD_AXIS_RIGHTY);
+    axes[0] = (uint32_t)(lx + 32768);  // X
+    axes[1] = (uint32_t)(ly + 32768);  // Y
+    axes[2] = 32767;                   // Z (throttle; unused)
+    axes[3] = (uint32_t)(ry + 32768);  // R
+    axes[4] = (uint32_t)(rx + 32768);  // U
+    axes[5] = 32767;                   // V
+    uint32_t b = 0;
+    for (int i = 0; i < NBUTTONS; i++)
+        if (SDL_GetGamepadButton(gp, BUTTON_SDL[i])) b |= (1u << i);
+    *buttons = b;
+    int up = SDL_GetGamepadButton(gp, SDL_GAMEPAD_BUTTON_DPAD_UP);
+    int dn = SDL_GetGamepadButton(gp, SDL_GAMEPAD_BUTTON_DPAD_DOWN);
+    int lf = SDL_GetGamepadButton(gp, SDL_GAMEPAD_BUTTON_DPAD_LEFT);
+    int rt = SDL_GetGamepadButton(gp, SDL_GAMEPAD_BUTTON_DPAD_RIGHT);
+    uint32_t p = 0xFFFFFFFF; // centered
+    if (up && !dn) p = rt ? 4500 : lf ? 31500 : 0;
+    else if (dn && !up) p = rt ? 13500 : lf ? 22500 : 18000;
+    else if (rt && !lf) p = 9000;
+    else if (lf && !rt) p = 27000;
+    *pov = p;
+    return 1;
+}

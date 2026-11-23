@@ -27,6 +27,10 @@ int asar_stat(const Asar *a, const char *relpath, uint64_t *offset, uint64_t *si
 typedef void (*asar_list_cb)(void *ctx, const char *name, int is_dir, uint64_t size);
 int asar_list(const Asar *a, const char *reldir, asar_list_cb cb, void *ctx);
 
+// Iterate every entry (files and dirs) with its full relative path + location.
+typedef void (*asar_each_cb)(void *ctx, const char *relpath, uint64_t offset, uint64_t size, int is_dir);
+void asar_foreach(const Asar *a, asar_each_cb cb, void *ctx);
+
 // Pack a directory tree into an aligned .asar (standard, stock-tool readable).
 // Returns 0 on success, non-zero on error.
 int asar_pack(const char *srcdir, const char *outpath);
@@ -34,3 +38,7 @@ int asar_pack(const char *srcdir, const char *outpath);
 // Debug: open an .asar, print its index, and (if relpath) read + hexdump the head
 // of that entry. Returns 0 on success. Exercises the reader end to end.
 int asar_debug_list(const char *path, const char *relpath);
+
+// Find a bootable .exe in the archive (prefers a top-level one). On success writes
+// its relative path (backslash-separated, Windows style) to out and returns 1.
+int asar_find_exe(const char *path, char *out, size_t outsz);

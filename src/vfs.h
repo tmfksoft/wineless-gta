@@ -1,6 +1,7 @@
 #pragma once
 #include <stdbool.h>
 #include <stddef.h>
+#include <stdint.h>
 
 // Virtual Windows layout presented to the game:
 //   C:\game                                              -> game dir (indexed)
@@ -37,3 +38,17 @@ void vfs_full_path(const char *winpath, char *out, size_t outsz);
 
 const char *vfs_game_dir(void);
 const char *vfs_user_dir(void);
+
+// ---- ASAR game mount ----
+// True if the game dir is served from an .asar archive (vfs_init was given one).
+bool vfs_game_is_archive(void);
+// The archive's fd (for pread/mmap). -1 if not an archive mount.
+int  vfs_game_archive_fd(void);
+// Resolve a Windows path to an archive entry. On a file hit sets *off (absolute
+// in the archive) and *size; on a dir hit sets *is_dir. Returns true on any hit.
+bool vfs_archive_entry(const char *winpath, uint64_t *off, uint64_t *size, int *is_dir);
+// Enumerate immediate children of an archive directory for FindFirstFile. cb gets
+// each child's name + whether it's a dir. Returns child count, or -1 if not an
+// archive dir.
+typedef void (*vfs_arc_list_cb)(void *ctx, const char *name, int is_dir, uint64_t size);
+int vfs_archive_list(const char *windir, vfs_arc_list_cb cb, void *ctx);

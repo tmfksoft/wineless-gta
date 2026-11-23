@@ -1,6 +1,7 @@
 // winmm: waveOut playback through our mixer, multimedia timers, and "no
 // device" answers for MIDI/mixer/aux/MCI/mmio/waveIn and msacm32.
 #include <stdio.h>
+#include <string.h>
 #include <math.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -111,7 +112,64 @@ void waveout_mix(float *out, int frames) {
 }
 
 API(winmm, waveOutGetNumDevs, 0) { return 1; }
-API(winmm, joyGetNumDevs, 0) { return 0; } // no joystick driver (installers just probe)
+
+// ---- legacy joystick (winmm) backed by the SDL gamepad (incl. the core's
+// virtual pad). Games like Tomb Raider III poll joyGetPosEx. ----
+int wl_joy_read(uint32_t axes[6], uint32_t *buttons, uint32_t *pov);
+#define JOYERR_NOERROR   0
+#define JOYERR_UNPLUGGED 167
+API(winmm, joyGetNumDevs, 0) { return 16; } // count the driver *supports*
+API(winmm, joyGetDevCapsA, 3) {
+    uint32_t axes[6], buttons, pov;
+    if (ARG(0) != 0 || !wl_joy_read(axes, &buttons, &pov)) return JOYERR_UNPLUGGED;
+    uint8_t *c = PTR(1);
+    uint32_t n = ARG(2);
+    if (n) memset(c, 0, n);
+    // JOYCAPS: wMid,wPid @0/2; szPname[32] @4; then ranges at @36...
+    if (n >= 36 + 8 * 4 + 6 * 4 + 4 * 2 + 32 + 260) {
+        uint32_t *r = (uint32_t *)(c + 36);
+        r[0] = 0; r[1] = 65535; // X min/max
+        r[2] = 0; r[3] = 65535; // Y
+        r[4] = 0; r[5] = 65535; // Z
+        uint16_t *w = (uint16_t *)(c + 36 + 6 * 4);
+        w[0] = 10;   // wNumButtons
+        w[1] = 10;   // wPeriodMin
+        w[2] = 1000; // wPeriodMax
+        uint32_t *r2 = (uint32_t *)(c + 36 + 6 * 4 + 6); // Rmin..Vmax
+        r2[0] = 0; r2[1] = 65535; r2[2] = 0; r2[3] = 65535; r2[4] = 0; r2[5] = 65535;
+        uint16_t *w2 = (uint16_t *)(c + 36 + 6 * 4 + 6 + 6 * 4);
+        w2[0] = 0x1 | 0x2 | 0x4 | 0x8 | 0x10; // wCaps: HAS Z/R/U/V/POV
+        w2[1] = 6;  // wMaxAxes
+        w2[2] = 6;  // wNumAxes
+        w2[3] = 10; // wMaxButtons
+    }
+    return JOYERR_NOERROR;
+}
+API(winmm, joyGetDevCapsW, 3) { return api_winmm_joyGetDevCapsA(_args); }
+API(winmm, joyGetPos, 2) {
+    uint32_t axes[6], buttons, pov;
+    if (ARG(0) != 0 || !wl_joy_read(axes, &buttons, &pov)) return JOYERR_UNPLUGGED;
+    uint32_t *i = PTR(1); // JOYINFO: X,Y,Z,Buttons
+    i[0] = axes[0]; i[1] = axes[1]; i[2] = axes[2]; i[3] = buttons;
+    return JOYERR_NOERROR;
+}
+API(winmm, joyGetPosEx, 2) {
+    uint32_t axes[6], buttons, pov;
+    if (ARG(0) != 0 || !wl_joy_read(axes, &buttons, &pov)) return JOYERR_UNPLUGGED;
+    uint32_t *x = PTR(1); // JOYINFOEX: dwSize,dwFlags,X,Y,Z,R,U,V,Buttons,ButtonNumber,POV,...
+    x[2] = axes[0]; x[3] = axes[1]; x[4] = axes[2];
+    x[5] = axes[3]; x[6] = axes[4]; x[7] = axes[5];
+    x[8] = buttons;
+    uint32_t nb = 0;
+    for (int b = 0; b < 32; b++) if (buttons & (1u << b)) nb++;
+    x[9] = nb;
+    x[10] = pov;
+    return JOYERR_NOERROR;
+}
+API(winmm, joySetCapture, 4) { return JOYERR_NOERROR; }
+API(winmm, joyReleaseCapture, 1) { return JOYERR_NOERROR; }
+API(winmm, joySetThreshold, 2) { return JOYERR_NOERROR; }
+API(winmm, joyGetThreshold, 2) { if (PTR(1)) *(uint32_t *)PTR(1) = 0; return JOYERR_NOERROR; }
 API(winmm, waveOutGetDevCapsA, 3) {
     uint8_t *c = PTR(1);
     uint32_t n = ARG(2) < 52 ? ARG(2) : 52;

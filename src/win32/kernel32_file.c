@@ -62,6 +62,27 @@ static uint32_t create_file(const char *name, uint32_t access, uint32_t disp, ui
         set_last_error(ERROR_FILE_NOT_FOUND);
         return INVALID_HANDLE_VALUE;
     }
+    // Game dir served from an .asar: stream a read-only data file straight from
+    // the archive (no extraction). Checked before vfs_to_host so big files don't
+    // trigger the on-demand extraction that vfs_to_host does for other callers.
+    // (Extracted exe/dll are real files and fall through to the normal path.)
+    if (vfs_game_is_archive() && !(access & GENERIC_WRITE) &&
+        disp != CREATE_NEW && disp != CREATE_ALWAYS) {
+        uint64_t aoff, asize; int aisdir;
+        if (vfs_archive_entry(name, &aoff, &asize, &aisdir) && !aisdir) {
+            Object *o = obj_new(OBJ_FILE);
+            o->file.fd = -1;
+            o->file.is_arc = 1;
+            o->file.arc_off = aoff;
+            o->file.arc_size = asize;
+            o->file.arc_pos = 0;
+            o->file.path = strdup(name);
+            set_last_error(0);
+            LOGD("CreateFile(%s) -> asar @%llu size %llu", name,
+                 (unsigned long long)aoff, (unsigned long long)asize);
+            return handle_alloc(o);
+        }
+    }
     if (!vfs_to_host(name, host, sizeof host)) {
         set_last_error(ERROR_PATH_NOT_FOUND);
         return INVALID_HANDLE_VALUE;
@@ -132,6 +153,17 @@ API(kernel32, ReadFile, 5) {
     Object *o = file_obj(ARG(0));
     if (!o) { set_last_error(ERROR_INVALID_HANDLE); return FALSE; }
     uint32_t *ov = PTR(4);
+    if (o->file.is_arc) {
+        uint64_t fpos = ov ? (((uint64_t)ov[3] << 32) | ov[2]) : o->file.arc_pos;
+        uint64_t avail = fpos < o->file.arc_size ? o->file.arc_size - fpos : 0;
+        uint32_t want = ARG(2) < avail ? ARG(2) : (uint32_t)avail;
+        ssize_t r = want ? pread(vfs_game_archive_fd(), PTR(1), want, (off_t)(o->file.arc_off + fpos)) : 0;
+        if (r < 0) { set_last_error(win32_errno(errno)); if (ARG(3)) *(uint32_t *)PTR(3) = 0; return FALSE; }
+        if (!ov) o->file.arc_pos = fpos + (uint64_t)r;
+        if (ARG(3)) *(uint32_t *)PTR(3) = (uint32_t)r;
+        if (ov) complete_overlapped(ov, (uint32_t)r);
+        return TRUE;
+    }
     ssize_t r;
     if (ov) r = pread(o->file.fd, PTR(1), ARG(2), (off_t)ov[2] | ((off_t)ov[3] << 32));
     else r = read(o->file.fd, PTR(1), ARG(2));
@@ -170,11 +202,25 @@ API(kernel32, GetOverlappedResult, 4) {
     return TRUE;
 }
 
+static uint64_t arc_seek(Object *o, int64_t off, uint32_t whence) {
+    int64_t base = whence % 3 == 0 ? 0 : whence % 3 == 1 ? (int64_t)o->file.arc_pos : (int64_t)o->file.arc_size;
+    int64_t np = base + off;
+    if (np < 0) np = 0;
+    o->file.arc_pos = (uint64_t)np;
+    return (uint64_t)np;
+}
+
 API(kernel32, SetFilePointer, 4) {
     Object *o = file_obj(ARG(0));
     if (!o) { set_last_error(ERROR_INVALID_HANDLE); return 0xFFFFFFFF; }
     int32_t *hi = PTR(2);
     off_t off = hi ? (off_t)(((uint64_t)(uint32_t)*hi << 32) | ARG(1)) : (off_t)(int32_t)ARG(1);
+    if (o->file.is_arc) {
+        uint64_t np = arc_seek(o, off, ARG(3));
+        if (hi) *hi = (int32_t)(np >> 32);
+        set_last_error(0);
+        return (uint32_t)np;
+    }
     static const int wh[] = {SEEK_SET, SEEK_CUR, SEEK_END};
     off_t r = lseek(o->file.fd, off, wh[ARG(3) % 3]);
     if (r < 0) { set_last_error(win32_errno(errno)); return 0xFFFFFFFF; }
@@ -186,6 +232,11 @@ API(kernel32, SetFilePointerEx, 5) {
     Object *o = file_obj(ARG(0));
     if (!o) { set_last_error(ERROR_INVALID_HANDLE); return FALSE; }
     off_t off = (off_t)((uint64_t)ARG(1) | ((uint64_t)ARG(2) << 32));
+    if (o->file.is_arc) {
+        uint64_t np = arc_seek(o, off, ARG(4));
+        if (ARG(3)) *(int64_t *)PTR(3) = (int64_t)np;
+        return TRUE;
+    }
     static const int wh[] = {SEEK_SET, SEEK_CUR, SEEK_END};
     off_t r = lseek(o->file.fd, off, wh[ARG(4) % 3]);
     if (r < 0) { set_last_error(win32_errno(errno)); return FALSE; }
@@ -194,15 +245,22 @@ API(kernel32, SetFilePointerEx, 5) {
 }
 API(kernel32, GetFileSize, 2) {
     Object *o = file_obj(ARG(0));
+    if (!o) { set_last_error(ERROR_INVALID_HANDLE); return 0xFFFFFFFF; }
+    if (o->file.is_arc) {
+        if (ARG(1)) *(uint32_t *)PTR(1) = (uint32_t)(o->file.arc_size >> 32);
+        return (uint32_t)o->file.arc_size;
+    }
     struct stat st;
-    if (!o || fstat(o->file.fd, &st)) { set_last_error(ERROR_INVALID_HANDLE); return 0xFFFFFFFF; }
+    if (fstat(o->file.fd, &st)) { set_last_error(ERROR_INVALID_HANDLE); return 0xFFFFFFFF; }
     if (ARG(1)) *(uint32_t *)PTR(1) = (uint32_t)((uint64_t)st.st_size >> 32);
     return (uint32_t)st.st_size;
 }
 API(kernel32, GetFileSizeEx, 2) {
     Object *o = file_obj(ARG(0));
+    if (!o) { set_last_error(ERROR_INVALID_HANDLE); return FALSE; }
+    if (o->file.is_arc) { *(int64_t *)PTR(1) = (int64_t)o->file.arc_size; return TRUE; }
     struct stat st;
-    if (!o || fstat(o->file.fd, &st)) { set_last_error(ERROR_INVALID_HANDLE); return FALSE; }
+    if (fstat(o->file.fd, &st)) { set_last_error(ERROR_INVALID_HANDLE); return FALSE; }
     *(int64_t *)PTR(1) = st.st_size;
     return TRUE;
 }
@@ -375,11 +433,22 @@ uint32_t wineless_file_exists(const char *path) {
     return vfs_to_host(path, host, sizeof host) && !stat(host, &st);
 }
 
+// A game file that lives only in the .asar.
+static uint32_t archive_attrs(const char *name) {
+    uint64_t off, size; int isdir;
+    if (!vfs_archive_entry(name, &off, &size, &isdir)) return INVALID_FILE_ATTRIBUTES;
+    return isdir ? FILE_ATTRIBUTE_DIRECTORY : (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_ARCHIVE);
+}
 API(kernel32, GetFileAttributesA, 1) {
     char host[PATH_MAX];
     struct stat st;
     if (!vfs_to_host(STR(0), host, sizeof host)) { set_last_error(ERROR_PATH_NOT_FOUND); return INVALID_FILE_ATTRIBUTES; }
-    if (stat(host, &st)) { set_last_error(win32_errno(errno)); return INVALID_FILE_ATTRIBUTES; }
+    if (stat(host, &st)) {
+        uint32_t a = archive_attrs(STR(0));
+        if (a != INVALID_FILE_ATTRIBUTES) return a;
+        set_last_error(win32_errno(errno));
+        return INVALID_FILE_ATTRIBUTES;
+    }
     return attrs_of(&st);
 }
 API(kernel32, SetFileAttributesA, 2) { return TRUE; }
@@ -415,6 +484,22 @@ static void fill_find_data(uint8_t *fd, const FindEntry *e) {
     snprintf((char *)fd + 44, 260, "%s", e->name);
 }
 
+// Collect matching .asar entries into a find object (used for the archive game dir).
+typedef struct { Object *o; int cap; const char *mask; } FindArc;
+static void find_arc_add(void *v, const char *name, int is_dir, uint64_t size) {
+    FindArc *fa = v;
+    if (!wild_match(fa->mask, name)) return;
+    if (fa->o->find.n == fa->cap) {
+        fa->cap = fa->cap ? fa->cap * 2 : 32;
+        fa->o->find.e = realloc(fa->o->find.e, fa->cap * sizeof *fa->o->find.e);
+    }
+    FindEntry *e = &fa->o->find.e[fa->o->find.n++];
+    snprintf(e->name, sizeof e->name, "%s", name);
+    e->is_dir = is_dir;
+    e->size = size;
+    e->mtime = 0;
+}
+
 uint32_t wineless_find_first(const char *pattern, void *data) {
     char pat[PATH_MAX], dir[PATH_MAX], host[PATH_MAX];
     snprintf(pat, sizeof pat, "%s", pattern);
@@ -425,10 +510,24 @@ uint32_t wineless_find_first(const char *pattern, void *data) {
     if (bs) { *bs = 0; snprintf(dir, sizeof dir, "%s", *pat ? pat : "\\"); mask = bs + 1; }
     else { snprintf(dir, sizeof dir, "."); mask = pat; }
     if (!vfs_to_host(dir, host, sizeof host)) { set_last_error(ERROR_PATH_NOT_FOUND); return INVALID_HANDLE_VALUE; }
-    DIR *d = opendir(host);
-    if (!d) { set_last_error(ERROR_PATH_NOT_FOUND); return INVALID_HANDLE_VALUE; }
+
     Object *o = obj_new(OBJ_FIND);
     int cap = 0;
+    // Game dir served from an .asar: enumerate the archive (its index has every
+    // file, including the extracted exe/dll).
+    if (vfs_game_is_archive()) {
+        FindArc fa = { o, 0, mask };
+        int n = vfs_archive_list(dir, find_arc_add, &fa);
+        if (n >= 0) {
+            if (!o->find.n) { free(o->find.e); free(o); set_last_error(ERROR_FILE_NOT_FOUND); return INVALID_HANDLE_VALUE; }
+            fill_find_data(data, &o->find.e[0]);
+            o->find.pos = 1;
+            return handle_alloc(o);
+        }
+    }
+
+    DIR *d = opendir(host);
+    if (!d) { free(o); set_last_error(ERROR_PATH_NOT_FOUND); return INVALID_HANDLE_VALUE; }
     struct dirent *de;
     while ((de = readdir(d))) {
         if (!wild_match(mask, de->d_name)) continue;
@@ -549,8 +648,16 @@ API(kernel32, GetDiskFreeSpaceA, 5) {
 API(kernel32, CreateFileMappingA, 6) {
     Object *f = ARG(0) == INVALID_HANDLE_VALUE ? NULL : file_obj(ARG(0));
     Object *o = obj_new(OBJ_MAPPING);
-    o->mapping.fd = f ? dup(f->file.fd) : -1;
-    o->mapping.size = ARG(4);
+    if (f && f->file.is_arc) {
+        // Archive-backed file: map a window of the shared archive fd.
+        o->mapping.fd = dup(vfs_game_archive_fd());
+        o->mapping.is_arc = 1;
+        o->mapping.arc_base = f->file.arc_off;
+        o->mapping.size = ARG(4) ? ARG(4) : (uint32_t)f->file.arc_size;
+    } else {
+        o->mapping.fd = f ? dup(f->file.fd) : -1;
+        o->mapping.size = ARG(4);
+    }
     o->mapping.prot = ARG(2);
     if (ARG(5)) o->name = strdup(STR(5));
     return handle_alloc(o);
@@ -561,9 +668,13 @@ API(kernel32, MapViewOfFile, 5) {
     uint64_t off = ((uint64_t)ARG(2) << 32) | ARG(3);
     uint32_t size = ARG(4);
     if (!size) {
-        struct stat st;
-        size = o->mapping.fd >= 0 && !fstat(o->mapping.fd, &st) ? (uint32_t)(st.st_size - off) : o->mapping.size;
+        if (o->mapping.is_arc) size = (uint32_t)(o->mapping.size - off);
+        else {
+            struct stat st;
+            size = o->mapping.fd >= 0 && !fstat(o->mapping.fd, &st) ? (uint32_t)(st.st_size - off) : o->mapping.size;
+        }
     }
+    uint64_t file_off = o->mapping.arc_base + off; // arc_base is 0 for non-archive
     // LM_TAG_MAPPED (not VIRTUAL) so VirtualFree won't decommit a view: on Windows
     // mapped views are freed only by UnmapViewOfFile, and VirtualFree(MEM_DECOMMIT)
     // on one fails harmlessly. AoE memory-maps its DRS archives and then calls
@@ -573,10 +684,22 @@ API(kernel32, MapViewOfFile, 5) {
     if (!va) return 0;
     if (o->mapping.fd >= 0) {
         int prot = (ARG(1) & 2) ? PROT_READ | PROT_WRITE : PROT_READ;
-        void *p = mmap(G2H(va), size, prot, MAP_SHARED | MAP_FIXED, o->mapping.fd, (off_t)off);
-        if (p == MAP_FAILED) { lm_release(va); return 0; }
-        lm_commit(va, size, (ARG(1) & 2) ? PAGE_READWRITE : PAGE_READONLY);
-        // lm_commit re-protects; mapping stays file-backed
+        // An archive entry is zero-copy mmap'd only when its data is page-aligned
+        // (our packer aligns to 4K). Otherwise — or if mmap fails — copy the bytes
+        // into committed memory. Archive mappings are MAP_PRIVATE (read-only fd).
+        bool can_mmap = !o->mapping.is_arc || (file_off % 4096 == 0);
+        void *p = MAP_FAILED;
+        if (can_mmap) {
+            int mf = (o->mapping.is_arc ? MAP_PRIVATE : MAP_SHARED) | MAP_FIXED;
+            p = mmap(G2H(va), size, prot, mf, o->mapping.fd, (off_t)file_off);
+        }
+        if (p == MAP_FAILED) {
+            if (!o->mapping.is_arc) { lm_release(va); return 0; }
+            lm_commit(va, size, PAGE_READWRITE);
+            if (pread(o->mapping.fd, G2H(va), size, (off_t)file_off) < 0) { lm_release(va); return 0; }
+        } else {
+            lm_commit(va, size, (ARG(1) & 2) ? PAGE_READWRITE : PAGE_READONLY);
+        }
     } else {
         lm_commit(va, size, PAGE_READWRITE);
     }

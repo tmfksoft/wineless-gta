@@ -9,7 +9,10 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 
+#include "asar.h"
 #include "log.h"
 
 // ---------------------------------------------------------------- index
@@ -93,11 +96,13 @@ typedef struct {
     char root[PATH_MAX];
     bool indexed;
     Index ix;
+    Asar *asar; // non-NULL: this mount is served from an .asar archive
 } Mount;
 
 static Mount mounts[6];
 static Mount *game_mount, *user_mount;
 static int nmounts;
+static Mount *find_mount(const char *full, const char **rest);
 static pthread_rwlock_t vfs_lock = PTHREAD_RWLOCK_INITIALIZER;
 const char *g_user_subdir = "GTA San Andreas User Files";
 static char cwd[512] = VFS_GAME_VDIR;
@@ -148,6 +153,8 @@ static void mkdirs(const char *p) {
     mkdir(tmp, 0755);
 }
 
+void asar_extract_code(Asar *a, const char *code_dir);
+
 void vfs_init(const char *game_dir, const char *user_dir, const char *data_dir) {
     char docs[PATH_MAX];
     snprintf(docs, sizeof docs, "%s", user_dir);
@@ -176,11 +183,100 @@ void vfs_init(const char *game_dir, const char *user_dir, const char *data_dir) 
     char steam[PATH_MAX], real[PATH_MAX];
     snprintf(steam, sizeof steam, "%s/.steam/root/legacycompat", home ? home : "");
     if (realpath(steam, real)) add_mount(VFS_STEAM_VDIR, real, true);
-    game_mount = add_mount(VFS_GAME_VDIR, game_dir, true);
+
+    // An .asar game dir is served from the archive: PE images (exe/dll) are
+    // extracted to a temp dir (the loader needs real files); everything else is
+    // read from the archive by the file layer.
+    struct stat gst;
+    if (strlen(game_dir) > 5 && !strcasecmp(game_dir + strlen(game_dir) - 5, ".asar") &&
+        !stat(game_dir, &gst) && S_ISREG(gst.st_mode)) {
+        Asar *a = asar_open(game_dir);
+        if (!a) fatal("vfs: cannot open asar %s", game_dir);
+        char code_dir[PATH_MAX];
+        snprintf(code_dir, sizeof code_dir, "%s/wineless-asar-%d", data_dir, (int)getpid());
+        mkdirs(code_dir);
+        asar_extract_code(a, code_dir);
+        game_mount = add_mount(VFS_GAME_VDIR, code_dir, true);
+        game_mount->asar = a;
+        LOGI("vfs: game served from asar %s (code extracted to %s)", game_dir, code_dir);
+    } else {
+        game_mount = add_mount(VFS_GAME_VDIR, game_dir, true);
+    }
+}
+
+// Copy a byte range of the archive out to a real file (making parent dirs).
+static void extract_blob(int srcfd, uint64_t off, uint64_t size, const char *out) {
+    char tmp[PATH_MAX];
+    snprintf(tmp, sizeof tmp, "%s", out);
+    char *slash = strrchr(tmp, '/');
+    if (slash) { *slash = 0; mkdirs(tmp); *slash = '/'; }
+    int fd = open(out, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    if (fd < 0) return;
+    char buf[1 << 16];
+    uint64_t left = size, pos = off;
+    while (left) {
+        size_t want = left < sizeof buf ? (size_t)left : sizeof buf;
+        ssize_t r = pread(srcfd, buf, want, (off_t)pos);
+        if (r <= 0) break;
+        if (write(fd, buf, r) != r) break;
+        pos += r; left -= r;
+    }
+    close(fd);
+}
+
+// Extract every .exe/.dll entry up front (the PE loader needs real files).
+struct ExtractCtx { Asar *a; const char *dir; };
+static void extract_one(void *v, const char *rel, uint64_t off, uint64_t size, int is_dir) {
+    struct ExtractCtx *c = v;
+    if (is_dir) return;
+    size_t l = strlen(rel);
+    if (l < 4 || (strcasecmp(rel + l - 4, ".exe") && strcasecmp(rel + l - 4, ".dll"))) return;
+    char out[PATH_MAX];
+    snprintf(out, sizeof out, "%s/%s", c->dir, rel);
+    extract_blob(asar_fd(c->a), off, size, out);
+}
+void asar_extract_code(Asar *a, const char *code_dir) {
+    struct ExtractCtx c = { a, code_dir };
+    asar_foreach(a, extract_one, &c);
 }
 
 const char *vfs_game_dir(void) { return game_mount->root; }
 const char *vfs_user_dir(void) { return user_mount->root; }
+
+bool vfs_game_is_archive(void) { return game_mount && game_mount->asar; }
+int  vfs_game_archive_fd(void) { return vfs_game_is_archive() ? asar_fd(game_mount->asar) : -1; }
+
+// Map a Windows path to its (game) archive mount's relative path. Returns false
+// if it's not under an archive mount.
+static bool arc_rel(const char *winpath, char *rel, size_t relsz) {
+    if (!vfs_game_is_archive()) return false;
+    char full[1024];
+    vfs_full_path(winpath, full, sizeof full);
+    const char *rest;
+    Mount *m = find_mount(full, &rest);
+    if (m != game_mount) return false;
+    snprintf(rel, relsz, "%s", rest);
+    for (char *p = rel; *p; p++) if (*p == '\\') *p = '/';
+    return true;
+}
+
+bool vfs_archive_entry(const char *winpath, uint64_t *off, uint64_t *size, int *is_dir) {
+    char rel[1024];
+    if (!arc_rel(winpath, rel, sizeof rel)) return false;
+    return asar_stat(game_mount->asar, rel, off, size, is_dir) != 0;
+}
+
+struct ArcListShim { vfs_arc_list_cb cb; void *ctx; };
+static void arc_list_shim(void *v, const char *name, int is_dir, uint64_t size) {
+    struct ArcListShim *s = v;
+    s->cb(s->ctx, name, is_dir, size);
+}
+int vfs_archive_list(const char *windir, vfs_arc_list_cb cb, void *ctx) {
+    char rel[1024];
+    if (!arc_rel(windir, rel, sizeof rel)) return -1;
+    struct ArcListShim s = { cb, ctx };
+    return asar_list(game_mount->asar, rel, arc_list_shim, &s);
+}
 
 // Build canonical absolute virtual path: backslashes, no "." / "..", no dup separators.
 void vfs_full_path(const char *in, char *out, size_t outsz) {
@@ -276,6 +372,18 @@ bool vfs_to_host(const char *winpath, char *out, size_t outsz) {
     char actual[1024];
     resolve_rel(m, rel, actual, sizeof actual);
     snprintf(out, outsz, "%s%s%s", m->root, *actual ? "/" : "", actual);
+    // Archive game mount: a data file that isn't a real file on disk (only the
+    // exe/dll are pre-extracted) is extracted to the cache dir on first use, so
+    // every caller that opens a real path (the CRT, LoadImage, dshow, ...) works.
+    // Win32 CreateFile checks the archive first and streams instead (no extract).
+    if (m == game_mount && m->asar) {
+        struct stat st;
+        if (stat(out, &st) != 0) {
+            uint64_t off, size; int isdir;
+            if (asar_stat(m->asar, actual, &off, &size, &isdir) && !isdir)
+                extract_blob(asar_fd(m->asar), off, size, out);
+        }
+    }
     pthread_rwlock_unlock(&vfs_lock);
     return true;
 }

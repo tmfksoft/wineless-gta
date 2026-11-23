@@ -30,13 +30,14 @@ typedef struct Object {
     int refs;
     char *name; // named kernel objects
     union {
-        struct { int fd; int is_console; char *path; int delete_on_close; } file;
+        struct { int fd; int is_console; char *path; int delete_on_close;
+                 int is_arc; uint64_t arc_off, arc_size, arc_pos; } file;
         struct { int manual; int signaled; } event;
         struct { uint32_t owner; int count; } mutex;
         struct { int count, max; } sem;
         struct { struct Thread *t; int finished; } thread;
         struct { FindEntry *e; int n, pos; } find;
-        struct { int fd; uint32_t size; uint32_t prot; } mapping;
+        struct { int fd; uint32_t size; uint32_t prot; int is_arc; uint64_t arc_base; } mapping;
         struct { char *path; } regkey;
         struct { uint32_t pid; } process;
     };

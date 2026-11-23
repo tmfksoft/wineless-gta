@@ -226,6 +226,13 @@ int asar_list(const Asar *a, const char *reldir, asar_list_cb cb, void *ctx) {
     return count;
 }
 
+void asar_foreach(const Asar *a, asar_each_cb cb, void *ctx) {
+    for (size_t i = 0; i < a->n; i++) {
+        const Entry *e = &a->ents[i];
+        if (e->path[0]) cb(ctx, e->path, e->offset, e->size, e->is_dir);
+    }
+}
+
 // ---------------------------------------------------------------- packer
 
 typedef struct { char *buf; size_t n, cap; } Sbuf;
@@ -347,6 +354,29 @@ int asar_pack(const char *srcdir, const char *outpath) {
 }
 
 // ---------------------------------------------------------------- debug
+
+struct ExeFind { char top[512]; char any[512]; };
+static void exe_scan(void *v, const char *rel, uint64_t off, uint64_t size, int is_dir) {
+    (void)off; (void)size;
+    struct ExeFind *f = v;
+    size_t l = strlen(rel);
+    if (is_dir || l < 4 || strcasecmp(rel + l - 4, ".exe")) return;
+    if (!f->any[0]) snprintf(f->any, sizeof f->any, "%s", rel);
+    if (!strchr(rel, '/') && !f->top[0]) snprintf(f->top, sizeof f->top, "%s", rel);
+}
+int asar_find_exe(const char *path, char *out, size_t outsz) {
+    Asar *a = asar_open(path);
+    if (!a) return 0;
+    struct ExeFind f = {{0}, {0}};
+    asar_foreach(a, exe_scan, &f);
+    asar_close(a);
+    const char *pick = f.top[0] ? f.top : f.any[0] ? f.any : NULL;
+    if (!pick) return 0;
+    size_t j = 0;
+    for (size_t i = 0; pick[i] && j + 1 < outsz; i++) out[j++] = pick[i] == '/' ? '\\' : pick[i];
+    out[j] = 0;
+    return 1;
+}
 
 int asar_debug_list(const char *path, const char *relpath) {
     Asar *a = asar_open(path);

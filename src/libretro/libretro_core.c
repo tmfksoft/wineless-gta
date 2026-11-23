@@ -287,13 +287,20 @@ bool retro_load_game(const struct retro_game_info *game) {
     // Derive game dir + exe from --game <path/to/game.exe>; else wl_boot_game
     // falls back to $WINELESS_GAME_DIR / $WINELESS_EXE / cwd.
     if (game && game->path && game->path[0]) {
-        char tmp[4096];
-        snprintf(tmp, sizeof tmp, "%s", game->path);
-        char *d = dirname(tmp);
-        snprintf(g_game_dir, sizeof g_game_dir, "%s", d);
-        snprintf(tmp, sizeof tmp, "%s", game->path);
-        char *b = basename(tmp);
-        snprintf(g_exe_name, sizeof g_exe_name, "%s", b);
+        const char *p = game->path;
+        size_t l = strlen(p);
+        if (l > 5 && strcasecmp(p + l - 5, ".asar") == 0) {
+            // A whole game packed as one .asar — wl_boot_game mounts it and finds
+            // the exe inside. (WINELESS_EXE can still pin a specific one.)
+            snprintf(g_game_dir, sizeof g_game_dir, "%s", p);
+            g_exe_name[0] = 0;
+        } else {
+            char tmp[4096];
+            snprintf(tmp, sizeof tmp, "%s", p);
+            snprintf(g_game_dir, sizeof g_game_dir, "%s", dirname(tmp));
+            snprintf(tmp, sizeof tmp, "%s", p);
+            snprintf(g_exe_name, sizeof g_exe_name, "%s", basename(tmp));
+        }
     }
 
     // Engage the present-barrier + audio bridge, then boot the guest on its own
