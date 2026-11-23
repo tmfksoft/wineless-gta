@@ -43,6 +43,21 @@ void wl_key_set(unsigned dik, int down);
 void wl_mouse_move(int dx, int dy);
 void wl_mouse_button(int btn, int down);
 
+// ---- native virtual gamepad (dinput_pad.c) ----
+// When set (before the guest boots), a virtual Xbox-style pad is attached so the
+// game sees a real controller with analog sticks. The core drives it from the
+// libretro RetroPad. 0 in standalone.
+extern int wl_core_pad;
+// Neutral button ids (mapped to SDL gamepad buttons inside dinput_pad.c).
+enum {
+    WL_PAD_A, WL_PAD_B, WL_PAD_X, WL_PAD_Y, WL_PAD_BACK, WL_PAD_START,
+    WL_PAD_LB, WL_PAD_RB, WL_PAD_LS, WL_PAD_RS,
+    WL_PAD_UP, WL_PAD_DOWN, WL_PAD_LEFT, WL_PAD_RIGHT
+};
+void wl_pad_button(int which, int down);
+// Sticks -32768..32767 (Y positive = down); triggers 0..32767.
+void wl_pad_axes(int lx, int ly, int rx, int ry, int lt, int rt);
+
 #ifdef __cplusplus
 }
 #endif

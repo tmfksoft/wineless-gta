@@ -173,14 +173,10 @@ void retro_get_system_av_info(struct retro_system_av_info *info) {
 void retro_set_controller_port_device(unsigned port, unsigned device) { (void)port; (void)device; }
 void retro_reset(void) {}
 
-// Map the RetroPad (port 0) onto the guest's keyboard + mouse. Digital buttons
-// and the left stick drive movement/action keys; the right stick drives the
-// mouse (camera/aim); the triggers are the mouse buttons (fire/aim). This is a
-// sensible default for the GTA-era games (arrow-key movement, mouse look); the
-// exact key choices can be refined per game.
-//
-// DIK scancodes: Up C8 Down D0 Left CB Right CD, Enter 1C, Esc 01, Space 39,
-// LShift 2A, LCtrl 1D, Tab 0F, F 21.
+// Drive the native virtual gamepad from the RetroPad (port 0), so the game sees a
+// real Xbox-style controller with analog sticks and triggers. RetroPad face
+// buttons use the standard positional (Nintendo<->Xbox) swap so a physical pad
+// maps 1:1. This gives true analog movement / camera for the GTA-era games.
 static int16_t joy(unsigned id)  { return input_state_cb(0, RETRO_DEVICE_JOYPAD, 0, id); }
 static int16_t axis(unsigned idx, unsigned ax) {
     return input_state_cb(0, RETRO_DEVICE_ANALOG, idx, ax);
@@ -189,46 +185,43 @@ static int16_t axis(unsigned idx, unsigned ax) {
 static void poll_input(void) {
     if (!input_state_cb) return;
 
-    // ---- keys: digital buttons + left stick -> movement/action ----
-    static const struct { unsigned id; unsigned dik; } btn[] = {
-        { RETRO_DEVICE_ID_JOYPAD_UP,    0xC8 }, // Up
-        { RETRO_DEVICE_ID_JOYPAD_DOWN,  0xD0 }, // Down
-        { RETRO_DEVICE_ID_JOYPAD_LEFT,  0xCB }, // Left
-        { RETRO_DEVICE_ID_JOYPAD_RIGHT, 0xCD }, // Right
-        { RETRO_DEVICE_ID_JOYPAD_A,     0x1C }, // Enter  (select / enter-exit vehicle)
-        { RETRO_DEVICE_ID_JOYPAD_START, 0x1C }, // Enter  (menu start)
-        { RETRO_DEVICE_ID_JOYPAD_B,     0x39 }, // Space  (sprint / brake)
-        { RETRO_DEVICE_ID_JOYPAD_Y,     0x2A }, // LShift (jump)
-        { RETRO_DEVICE_ID_JOYPAD_X,     0x1D }, // LCtrl  (action/fire alt)
-        { RETRO_DEVICE_ID_JOYPAD_SELECT,0x01 }, // Esc    (back / pause)
-        { RETRO_DEVICE_ID_JOYPAD_L,     0x0F }, // Tab
-        { RETRO_DEVICE_ID_JOYPAD_R,     0x21 }, // F
+    static const struct { unsigned id; int pad; } bmap[] = {
+        { RETRO_DEVICE_ID_JOYPAD_B,      WL_PAD_A },     // bottom face -> Xbox A
+        { RETRO_DEVICE_ID_JOYPAD_A,      WL_PAD_B },     // right face  -> Xbox B
+        { RETRO_DEVICE_ID_JOYPAD_Y,      WL_PAD_X },     // left face   -> Xbox X
+        { RETRO_DEVICE_ID_JOYPAD_X,      WL_PAD_Y },     // top face    -> Xbox Y
+        { RETRO_DEVICE_ID_JOYPAD_SELECT, WL_PAD_BACK },
+        { RETRO_DEVICE_ID_JOYPAD_START,  WL_PAD_START },
+        { RETRO_DEVICE_ID_JOYPAD_L,      WL_PAD_LB },
+        { RETRO_DEVICE_ID_JOYPAD_R,      WL_PAD_RB },
+        { RETRO_DEVICE_ID_JOYPAD_L3,     WL_PAD_LS },
+        { RETRO_DEVICE_ID_JOYPAD_R3,     WL_PAD_RS },
+        { RETRO_DEVICE_ID_JOYPAD_UP,     WL_PAD_UP },
+        { RETRO_DEVICE_ID_JOYPAD_DOWN,   WL_PAD_DOWN },
+        { RETRO_DEVICE_ID_JOYPAD_LEFT,   WL_PAD_LEFT },
+        { RETRO_DEVICE_ID_JOYPAD_RIGHT,  WL_PAD_RIGHT },
     };
-    static const unsigned diks[] = { 0xC8,0xD0,0xCB,0xCD,0x1C,0x39,0x2A,0x1D,0x01,0x0F,0x21 };
-    uint8_t want[256] = { 0 };
-    for (unsigned i = 0; i < sizeof btn / sizeof *btn; i++)
-        if (joy(btn[i].id)) want[btn[i].dik] = 1;
+    for (unsigned i = 0; i < sizeof bmap / sizeof *bmap; i++)
+        wl_pad_button(bmap[i].pad, joy(bmap[i].id) != 0);
 
-    const int TH = 12000; // left-stick -> arrow threshold
-    int16_t lx = axis(RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_X);
-    int16_t ly = axis(RETRO_DEVICE_INDEX_ANALOG_LEFT, RETRO_DEVICE_ID_ANALOG_Y);
-    if (lx < -TH) want[0xCB] = 1;  if (lx > TH) want[0xCD] = 1;
-    if (ly < -TH) want[0xC8] = 1;  if (ly > TH) want[0xD0] = 1;
+    int lx = axis(RETRO_DEVICE_INDEX_ANALOG_LEFT,  RETRO_DEVICE_ID_ANALOG_X);
+    int ly = axis(RETRO_DEVICE_INDEX_ANALOG_LEFT,  RETRO_DEVICE_ID_ANALOG_Y);
+    int rx = axis(RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_X);
+    int ry = axis(RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y);
+    int lt = joy(RETRO_DEVICE_ID_JOYPAD_L2) ? 32767 : 0;
+    int rt = joy(RETRO_DEVICE_ID_JOYPAD_R2) ? 32767 : 0;
+    wl_pad_axes(lx, ly, rx, ry, lt, rt);
 
-    for (unsigned i = 0; i < sizeof diks / sizeof *diks; i++)
-        wl_key_set(diks[i], want[diks[i]]);
-
-    // ---- right stick -> relative mouse (camera / aim) ----
-    const int DZ = 6000;
-    int16_t rx = axis(RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_X);
-    int16_t ry = axis(RETRO_DEVICE_INDEX_ANALOG_RIGHT, RETRO_DEVICE_ID_ANALOG_Y);
-    int mdx = (rx > DZ || rx < -DZ) ? rx / 1800 : 0;
-    int mdy = (ry > DZ || ry < -DZ) ? ry / 1800 : 0;
-    if (mdx || mdy) wl_mouse_move(mdx, mdy);
-
-    // ---- triggers -> mouse buttons (R2/R = fire, L2/L already Tab/F above) ----
-    wl_mouse_button(0, joy(RETRO_DEVICE_ID_JOYPAD_R2) != 0);  // left = fire
-    wl_mouse_button(1, joy(RETRO_DEVICE_ID_JOYPAD_L2) != 0);  // right = aim
+    // The GTA-era menus are keyboard-driven (they ignore the pad), so overlay a
+    // few keys for menu use: d-pad -> arrows, START -> Enter (accept), SELECT ->
+    // Esc (back). Face buttons stay pad-only so in-game actions don't also fire
+    // menu keys. (d-pad also moves in-game, redundant with the left stick.)
+    wl_key_set(0xC8, joy(RETRO_DEVICE_ID_JOYPAD_UP)    != 0);
+    wl_key_set(0xD0, joy(RETRO_DEVICE_ID_JOYPAD_DOWN)  != 0);
+    wl_key_set(0xCB, joy(RETRO_DEVICE_ID_JOYPAD_LEFT)  != 0);
+    wl_key_set(0xCD, joy(RETRO_DEVICE_ID_JOYPAD_RIGHT) != 0);
+    wl_key_set(0x1C, joy(RETRO_DEVICE_ID_JOYPAD_START) != 0); // Enter
+    wl_key_set(0x01, joy(RETRO_DEVICE_ID_JOYPAD_SELECT) != 0); // Esc
 }
 
 // ---- the core loop ----
@@ -307,6 +300,7 @@ bool retro_load_game(const struct retro_game_info *game) {
     // thread. wl_core_audio must be set before the guest starts so dsound does
     // not open its own output.
     wl_core_audio = 1;
+    wl_core_pad = 1;
     wl_present_hook = core_present;
     wl_submit_frame = core_submit;
     if (pthread_create(&guest_tid, NULL, guest_main, NULL) != 0) {

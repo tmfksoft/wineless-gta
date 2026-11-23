@@ -99,6 +99,49 @@ static void attach_virtual_pad(void) {
     LOGI("dinput: virtual gamepad %s", vjoy ? "attached" : SDL_GetError());
 }
 
+// ---- libretro core: drive the virtual pad from the frontend's RetroPad ----
+// SDL's SetJoystickVirtual* lock the joystick subsystem internally, so these are
+// safe to call from the frontend (retro_run) thread; the guest's event pump
+// applies them via SDL_UpdateJoysticks.
+#include "../present_hook.h"
+int wl_core_pad = 0;
+
+static SDL_GamepadButton wl_pad_sdl(int which) {
+    switch (which) {
+    case WL_PAD_A: return SDL_GAMEPAD_BUTTON_SOUTH;
+    case WL_PAD_B: return SDL_GAMEPAD_BUTTON_EAST;
+    case WL_PAD_X: return SDL_GAMEPAD_BUTTON_WEST;
+    case WL_PAD_Y: return SDL_GAMEPAD_BUTTON_NORTH;
+    case WL_PAD_BACK: return SDL_GAMEPAD_BUTTON_BACK;
+    case WL_PAD_START: return SDL_GAMEPAD_BUTTON_START;
+    case WL_PAD_LB: return SDL_GAMEPAD_BUTTON_LEFT_SHOULDER;
+    case WL_PAD_RB: return SDL_GAMEPAD_BUTTON_RIGHT_SHOULDER;
+    case WL_PAD_LS: return SDL_GAMEPAD_BUTTON_LEFT_STICK;
+    case WL_PAD_RS: return SDL_GAMEPAD_BUTTON_RIGHT_STICK;
+    case WL_PAD_UP: return SDL_GAMEPAD_BUTTON_DPAD_UP;
+    case WL_PAD_DOWN: return SDL_GAMEPAD_BUTTON_DPAD_DOWN;
+    case WL_PAD_LEFT: return SDL_GAMEPAD_BUTTON_DPAD_LEFT;
+    case WL_PAD_RIGHT: return SDL_GAMEPAD_BUTTON_DPAD_RIGHT;
+    default: return SDL_GAMEPAD_BUTTON_INVALID;
+    }
+}
+void wl_pad_button(int which, int down) {
+    if (!vjoy) return;
+    SDL_GamepadButton b = wl_pad_sdl(which);
+    if (b != SDL_GAMEPAD_BUTTON_INVALID) SDL_SetJoystickVirtualButton(vjoy, b, down ? true : false);
+}
+static int16_t clamp16(int v) { return v > 32767 ? 32767 : v < -32768 ? -32768 : (int16_t)v; }
+void wl_pad_axes(int lx, int ly, int rx, int ry, int lt, int rt) {
+    if (!vjoy) return;
+    SDL_SetJoystickVirtualAxis(vjoy, SDL_GAMEPAD_AXIS_LEFTX,  clamp16(lx));
+    SDL_SetJoystickVirtualAxis(vjoy, SDL_GAMEPAD_AXIS_LEFTY,  clamp16(ly));
+    SDL_SetJoystickVirtualAxis(vjoy, SDL_GAMEPAD_AXIS_RIGHTX, clamp16(rx));
+    SDL_SetJoystickVirtualAxis(vjoy, SDL_GAMEPAD_AXIS_RIGHTY, clamp16(ry));
+    // triggers: 0..32767 in -> -32768(released)..32767(pressed) axis
+    SDL_SetJoystickVirtualAxis(vjoy, SDL_GAMEPAD_AXIS_LEFT_TRIGGER,  clamp16(lt * 2 - 32768));
+    SDL_SetJoystickVirtualAxis(vjoy, SDL_GAMEPAD_AXIS_RIGHT_TRIGGER, clamp16(rt * 2 - 32768));
+}
+
 void pad_debug_tick(uint32_t now) {
     static const char *spec;
     static int init, n;
@@ -149,7 +192,7 @@ void pad_init(void) {
         LOGW("dinput: gamepad support unavailable: %s", SDL_GetError());
         return;
     }
-    if (getenv("WINELESS_VIRTUAL_PAD")) attach_virtual_pad();
+    if (wl_core_pad || getenv("WINELESS_VIRTUAL_PAD")) attach_virtual_pad();
     refresh();
     LOGI("dinput: %d gamepad(s) connected", nids);
     for (int i = 0; i < nids; i++) LOGI("dinput:   %s", SDL_GetGamepadNameForID(ids[i]));

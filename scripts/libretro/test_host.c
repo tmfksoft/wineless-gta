@@ -89,11 +89,18 @@ static void input_poll_cb(void) {}
 // Scripted input: after the menu should be up (~frame 120), pulse START+A to
 // drive "START GAME". id per RetroPad.
 static int16_t input_state_cb(unsigned port, unsigned dev, unsigned idx, unsigned id) {
-    (void)port; (void)idx;
-    if (dev != RETRO_DEVICE_JOYPAD) return 0;
-    bool pulse = g_frame > 120 && ((g_frame / 25) % 2 == 0); // 25 on, 25 off
-    if (pulse && (id == RETRO_DEVICE_ID_JOYPAD_START || id == RETRO_DEVICE_ID_JOYPAD_A))
-        return 1;
+    (void)port;
+    // Start the game: pulse START/B while in the menu (frames 120..660).
+    if (dev == RETRO_DEVICE_JOYPAD) {
+        bool pulse = g_frame > 120 && g_frame < 660 && ((g_frame / 25) % 2 == 0);
+        if (pulse && (id == RETRO_DEVICE_ID_JOYPAD_START || id == RETRO_DEVICE_ID_JOYPAD_B))
+            return 1;
+        return 0;
+    }
+    // Analog: after the game is running, hold the left stick forward to walk.
+    if (dev == RETRO_DEVICE_ANALOG && g_frame > 760 &&
+        idx == RETRO_DEVICE_INDEX_ANALOG_LEFT && id == RETRO_DEVICE_ID_ANALOG_Y)
+        return -28000; // up = forward
     return 0;
 }
 
