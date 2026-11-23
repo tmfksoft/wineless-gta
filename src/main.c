@@ -15,6 +15,7 @@
 #include "handles.h"
 #include "log.h"
 #include "lowmem.h"
+#include "asar.h"
 #include "pe.h"
 #include "thread.h"
 #include "vfs.h"
@@ -388,6 +389,18 @@ static int save_config(const char *exe, const char *game_dir, const char *user_d
 int main(int argc, char **argv) {
     legacy_env_aliases();
     if (argc > 1 && !strcmp(argv[1], "--install-steam-tool")) return install_steam_tool();
+    // Pack a game directory into an aligned .asar (files 4K-aligned for zero-copy
+    // MapViewOfFile). No engine needed — pure packaging. Usage:
+    //   wineless-gta --pack-asar <game-dir> <out.asar>
+    if (argc == 4 && !strcmp(argv[1], "--pack-asar")) {
+        int rc = asar_pack(argv[2], argv[3]);
+        if (rc) fprintf(stderr, "wineless-gta: packing %s failed (%d)\n", argv[2], rc);
+        else fprintf(stderr, "wineless-gta: packed %s -> %s\n", argv[2], argv[3]);
+        return rc ? 1 : 0;
+    }
+    // Debug: dump an .asar's index, and optionally hexdump the head of one entry.
+    //   wineless-gta --asar-list <file.asar> [relpath-to-read]
+    if (argc >= 3 && !strcmp(argv[1], "--asar-list")) return asar_debug_list(argv[2], argc > 3 ? argv[3] : NULL);
     log_init();
     char steam_game_dir[PATH_MAX] = "";
     int vr = steam_verb(&argc, &argv, steam_game_dir, sizeof steam_game_dir);
