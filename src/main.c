@@ -564,10 +564,20 @@ int wl_boot_game_resolved(const char *game_dir, const char *exe_host, const char
     // These games run exclusive fullscreen on Windows, where presents wait for
     // vsync; our swapchains are "windowed", so ask DXVK for vsync explicitly.
     setenv("DXVK_CONFIG", "d3d9.presentInterval = 1", 0);
-    // Prefer X11 (XWayland on Wayland desktops): SDL's Wayland path goes through
-    // libdecor, whose GTK plugin aborts on some GNOME setups. Override with
-    // SDL_VIDEO_DRIVER=wayland.
-    setenv("SDL_VIDEO_DRIVER", "x11,wayland", 0);
+    // Pick SDL's video driver. On a desktop prefer X11 (XWayland on Wayland
+    // desktops): SDL's Wayland path goes through libdecor, whose GTK plugin aborts
+    // on some GNOME setups. With no display server at all — the libretro core on
+    // an emulation node, CI, scripted/headless runs — both x11 and wayland fail
+    // and SDL_Init aborts, so fall back to SDL's "offscreen" driver: it renders
+    // through a Vulkan VK_EXT_headless_surface (which DXVK's SDL3 WSI enables from
+    // SDL_Vulkan_GetInstanceExtensions), the game draws off-screen, and the frame
+    // is read back as usual — the frontend owns the real display. Offscreen needs
+    // a Vulkan ICD that advertises VK_EXT_headless_surface (GPU driver or lavapipe).
+    // overwrite=0 throughout, so an operator-set SDL_VIDEO_DRIVER wins.
+    if (getenv("WAYLAND_DISPLAY") || getenv("DISPLAY"))
+        setenv("SDL_VIDEO_DRIVER", "x11,wayland", 0);
+    else
+        setenv("SDL_VIDEO_DRIVER", "offscreen", 0);
 
     // Build the game command line: "C:\GTA San Andreas\gta_sa.exe" args...
     char cmdline[4096];

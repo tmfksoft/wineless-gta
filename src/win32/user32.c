@@ -58,6 +58,8 @@ static void sdl_init_once(void) {
     SDL_SetHint(SDL_HINT_JOYSTICK_HIDAPI, "0");
     // A minimized window gets no swapchain images, which blocks Present forever.
     SDL_SetHint(SDL_HINT_VIDEO_MINIMIZE_ON_FOCUS_LOSS, "0");
+    // The video driver (x11/wayland on a desktop, offscreen when headless) is
+    // selected in wl_boot_game_resolved via SDL_VIDEO_DRIVER, before any SDL call.
     if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_EVENTS))
         fatal("SDL_Init failed: %s", SDL_GetError());
     LOGI("SDL %d.%d.%d, video driver: %s", SDL_MAJOR_VERSION, SDL_MINOR_VERSION, SDL_MICRO_VERSION,
