@@ -159,9 +159,17 @@ static void usage(const char *argv0) {
             "  --display   fullscreen (default) | borderless | windowed   (also $WINELESS_DISPLAY)\n"
             "  --install-steam-tool  register as a Steam compatibility tool (\"Wineless\")\n"
             "  --save      write the given params to ./wineless.config and exit (no launch)\n"
-            "A wineless.config next to the binary can set exe, game-dir, user-dir, display\n"
-            "and environment variables (key = value lines), for one-click drop-in launches.\n"
             "  --windowed  same as --display windowed\n"
+            "A --game-dir may also be an .asar archive (a whole game packed into one\n"
+            "file); the game runs straight from it.\n"
+            "\n"
+            "Packaging:\n"
+            "  --pack-asar <game-dir> <out.asar>        pack a game folder into an aligned .asar\n"
+            "  --asar-list <file.asar> [path]           list an .asar (and dump one entry)\n"
+            "  --make-bundle [base] <game|.asar> <out>  append a game onto this binary (or\n"
+            "              a given base, e.g. wineless_libretro.so) for a single self-booting file\n"
+            "An .asar may carry a wineless.config at its root (exe=, display=, WINELESS_*/DXVK_*/\n"
+            "SDL_* env); a wineless.config next to the binary works the same for drop-in launches.\n"
             "  WINELESS_LOG=error|warn|info|debug|trace\n",
             argv0);
 }
