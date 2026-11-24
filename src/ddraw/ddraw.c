@@ -689,17 +689,22 @@ static int legacy_modes(uint32_t (*out)[2]) {
     uint32_t dw, dh, hz;
     display_desktop(&dw, &dh, &hz);
     int n = 0, total = display_mode_count();
-    for (unsigned c = 0; c < sizeof common / sizeof *common && n < MAX_LEGACY_MODES - 1; c++)
-        for (int i = 0; i < total; i++) {
-            uint32_t w, h;
-            display_mode(i, &w, &h, &hz);
-            if (w == common[c][0] && h == common[c][1] && !(w == dw && h == dh)) {
-                out[n][0] = w;
-                out[n][1] = h;
-                n++;
-                break;
-            }
-        }
+    (void)total;
+    // Offer the standard resolution ladder up to the desktop size, independent of
+    // which modes the host's SDL display happens to enumerate. A headless
+    // (offscreen) host reports only its single fake mode, which left DirectDraw
+    // games with a 2-3 entry list; Tomb Raider III then selects a mode by an index
+    // its fixed table expects to be populated and reads back 0x0, which it divides
+    // by during view setup (crash). Since every mode is scaled through DXVK rather
+    // than really switched, listing the common resolutions on any host is safe.
+    for (unsigned c = 0; c < sizeof common / sizeof *common && n < MAX_LEGACY_MODES - 1; c++) {
+        uint32_t w = common[c][0], h = common[c][1];
+        if (w == dw && h == dh) continue;        // desktop is inserted below, in order
+        if (w > dw || h > dh) continue;          // nothing larger than the desktop
+        out[n][0] = w;
+        out[n][1] = h;
+        n++;
+    }
     // the desktop resolution, in order
     int at = n;
     for (int i = 0; i < n; i++)
