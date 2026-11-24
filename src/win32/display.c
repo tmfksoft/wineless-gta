@@ -51,6 +51,17 @@ void display_init(void) {
         desk_h = dm->h;
         desk_hz = dm->refresh_rate > 1 ? (int)(dm->refresh_rate + 0.5f) : 60;
     }
+    // The offscreen (headless) driver reports a single small fake mode (1024x768).
+    // Present a standard desktop instead, so the resolution ladder built from it is
+    // as rich as a real monitor's — DirectDraw games (Tomb Raider III) index into
+    // that list and read back 0x0 from a near-empty one. Everything is scaled by
+    // the frontend, so the exact size is cosmetic.
+    const char *vd = SDL_GetCurrentVideoDriver();
+    if (vd && !strcmp(vd, "offscreen")) {
+        desk_w = 1920;
+        desk_h = 1080;
+        desk_hz = 60;
+    }
     int n = 0;
     SDL_DisplayMode **list = d ? SDL_GetFullscreenDisplayModes(d, &n) : NULL;
     for (int i = 0; i < n; i++) add_mode(list[i]->w, list[i]->h);
