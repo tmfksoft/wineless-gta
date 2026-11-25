@@ -95,6 +95,15 @@ API(kernel32, GetProcessTimes, 5) {
     if (ARG(1)) ft_now(PTR(1));
     return TRUE;
 }
+// Same shape as GetProcessTimes: (hThread, creation, exit, kernel, user).
+// We don't track per-thread CPU time, so report zeros with a plausible
+// creation time. AoE2 HD's steam_api.dll calls this during init.
+API(kernel32, GetThreadTimes, 5) {
+    for (int i = 1; i <= 4; i++)
+        if (ARG(i)) memset(PTR(i), 0, 8);
+    if (ARG(1)) ft_now(PTR(1));
+    return TRUE;
+}
 
 // ---------------------------------------------------------------- system info
 API(kernel32, GetNativeSystemInfo, 1) {

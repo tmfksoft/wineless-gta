@@ -345,9 +345,21 @@ typedef struct { char exe[256], game_dir[PATH_MAX], user_dir[PATH_MAX]; } Config
 static void load_config(Config *c) {
     memset(c, 0, sizeof *c);
     char dir[PATH_MAX], path[PATH_MAX + 32];
-    if (!self_dir(dir, sizeof dir)) return;
-    snprintf(path, sizeof path, "%s/wineless.config", dir);
-    FILE *f = fopen(path, "r");
+    FILE *f = NULL;
+    // Prefer wineless.config in the current directory, so `cd <game>; wineless`
+    // reads the game's config even when the binary lives elsewhere (e.g. on
+    // PATH). Fall back to a config next to the binary (the drop-in-launch case).
+    char cwd[PATH_MAX];
+    if (getcwd(cwd, sizeof cwd)) {
+        snprintf(path, sizeof path, "%s/wineless.config", cwd);
+        f = fopen(path, "r");
+        if (f) snprintf(dir, sizeof dir, "%s", cwd); // resolve_path base
+    }
+    if (!f) {
+        if (!self_dir(dir, sizeof dir)) return;
+        snprintf(path, sizeof path, "%s/wineless.config", dir);
+        f = fopen(path, "r");
+    }
     if (!f) return;
     LOGI("config: %s", path);
     char line[1024];
@@ -384,7 +396,7 @@ static void apply_bundle_config(const char *self) {
     long n = asar_read_whole(self, "wineless.config", buf, sizeof buf - 1);
     if (n < 0) return;
     buf[n] = 0;
-    LOGI("config: wineless.config from bundle");
+    LOGI("config: wineless.config from asar");
     char *save = NULL;
     for (char *line = strtok_r(buf, "\r\n", &save); line; line = strtok_r(NULL, "\r\n", &save)) {
         char *key = line;
@@ -648,7 +660,9 @@ int wl_boot_game(const char *game_dir_in, const char *exe_name, const char *user
     size_t gl = strlen(game_dir);
     bool is_asar = (gl > 5 && !strcasecmp(game_dir + gl - 5, ".asar")) || asar_is_bundle(game_dir);
     if (is_asar) {
-        if (asar_is_bundle(game_dir)) apply_bundle_config(game_dir); // exe/display/env (lowest precedence)
+        // Read a wineless.config at the archive root for both a plain .asar and an
+        // appended bundle (exe/display/env, lowest precedence — real env wins).
+        apply_bundle_config(game_dir);
         if (!g_exe_name) {
             const char *envx = getenv("WINELESS_EXE");
             static char ebuf[256];

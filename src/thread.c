@@ -34,6 +34,17 @@ void thread_init_process(void) {
     *(uint16_t *)(peb + 0xAC) = 2600;
     *(uint32_t *)(peb + 0xB0) = 2;          // VER_PLATFORM_WIN32_NT
     *(uint32_t *)(peb + 0x64) = 1;          // NumberOfProcessors
+
+    // ProcessParameters (PEB+0x10). Some CRTs read PEB->ProcessParameters->Flags
+    // during per-thread startup (e.g. Goldberg's steam_api spawns a worker thread
+    // that does `cmp $0, fs:[30]->[10]->[8]`). Left NULL this faults; give it a
+    // valid RTL_USER_PROCESS_PARAMETERS with the normalized flag set.
+    uint32_t pp = lm_alloc(0x400, LM_GRAN, PAGE_READWRITE, LM_TAG_SYSTEM);
+    uint8_t *p = G2H(pp);
+    *(uint32_t *)(p + 0x00) = 0x400;        // MaximumLength
+    *(uint32_t *)(p + 0x04) = 0x400;        // Length
+    *(uint32_t *)(p + 0x08) = 1;            // Flags: RTL_USER_PROC_PARAMS_NORMALIZED
+    *(uint32_t *)(peb + 0x10) = pp;
 }
 
 // Signals with handlers must never run on a guest thread while fs points at the

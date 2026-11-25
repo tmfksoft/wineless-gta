@@ -304,3 +304,14 @@ API(advapi32, AdjustTokenPrivileges, 6) {
     set_last_error(1300 /*ERROR_NOT_ALL_ASSIGNED*/);
     return TRUE;
 }
+// SystemFunction036 == RtlGenRandom: fill the buffer with random bytes.
+// (hThread/handle-less; args are buffer, length.) Used by newer CRT/steam_api
+// to seed their RNG.
+API(advapi32, SystemFunction036, 2) {
+    uint32_t len = ARG(1);
+    if (len && ARG(0)) {
+        uint8_t *p = PTR(0);
+        for (uint32_t i = 0; i < len; i++) p[i] = (uint8_t)rand();
+    }
+    return TRUE;
+}

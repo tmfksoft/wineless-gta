@@ -138,6 +138,15 @@ API(kernel32, CreateThread, 6) {
     LOGD("CreateThread(start=0x%x, param=0x%x, flags=0x%x) -> 0x%x", ARG(2), ARG(3), ARG(4), t->handle);
     return handle_dup(t->handle);
 }
+// QueueUserWorkItem(Function, Context, Flags): run Function(Context) on a worker
+// thread. We don't pool, we just spawn a thread (the callback is a standard
+// THREAD_START_ROUTINE, same ABI as CreateThread). Goldberg's steam_api uses this
+// on its networking path. Returns TRUE on success.
+API(kernel32, QueueUserWorkItem, 3) {
+    Thread *t = thread_spawn(ARG(0), ARG(1), 0, 0);
+    if (!t) { set_last_error(ERROR_NOT_ENOUGH_MEMORY); return FALSE; }
+    return TRUE;
+}
 API(kernel32, ResumeThread, 1) {
     Object *o = handle_get(ARG(0), OBJ_THREAD);
     if (!o) return 0xFFFFFFFF;
