@@ -157,6 +157,25 @@ API(kernel32, GetEnvironmentVariableA, 3) {
     set_last_error(ERROR_ENVVAR_NOT_FOUND);
     return 0;
 }
+API(kernel32, GetEnvironmentVariableW, 3) {
+    char name[256];
+    w2a(WSTR(0), name, sizeof name);
+    size_t nl = strlen(name);
+    // Values come from the ASCII env block; widen on the way out. nSize/return
+    // are in WCHARs, matching Win32 (chars excl. NUL on success, required size
+    // incl. NUL if the buffer is too small).
+    for (const char *p = G2H(guest_env_a); *p; p += strlen(p) + 1)
+        if (!strncasecmp(p, name, nl) && p[nl] == '=') {
+            const char *val = p + nl + 1;
+            uint32_t vlen = (uint32_t)strlen(val);
+            uint16_t *dst = ARG(1) ? PTR(1) : NULL;
+            if (!dst || ARG(2) <= vlen) return vlen + 1;
+            a2w(val, dst, ARG(2));
+            return vlen;
+        }
+    set_last_error(ERROR_ENVVAR_NOT_FOUND);
+    return 0;
+}
 API(kernel32, GetVersion, 0) { return 0x0A280105; } // 5.1 build 2600
 API(kernel32, GetVersionExA, 1) {
     uint8_t *v = PTR(0);

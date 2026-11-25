@@ -255,6 +255,41 @@ API(kernel32, GetFileSize, 2) {
     if (ARG(1)) *(uint32_t *)PTR(1) = (uint32_t)((uint64_t)st.st_size >> 32);
     return (uint32_t)st.st_size;
 }
+// BY_HANDLE_FILE_INFORMATION: attrs, 3x FILETIME, volume serial, size, links,
+// 64-bit file index. Goldberg's steam_api reads this for its settings files.
+API(kernel32, GetFileInformationByHandle, 2) {
+    Object *o = file_obj(ARG(0));
+    if (!o || !ARG(1)) { set_last_error(ERROR_INVALID_HANDLE); return FALSE; }
+    uint8_t *b = PTR(1);
+    memset(b, 0, 0x34);
+    uint64_t size = 0, ino = 0, serial = 0, mtime = 0;
+    uint32_t links = 1, attr = 0x80; // FILE_ATTRIBUTE_NORMAL
+    if (o->file.is_arc) {
+        size = o->file.arc_size;
+        attr = 0x01; // READONLY
+    } else {
+        struct stat st;
+        if (fstat(o->file.fd, &st)) { set_last_error(ERROR_INVALID_HANDLE); return FALSE; }
+        size = (uint64_t)st.st_size;
+        ino = (uint64_t)st.st_ino;
+        serial = (uint32_t)st.st_dev;
+        links = (uint32_t)st.st_nlink;
+        mtime = (uint64_t)st.st_mtime;
+        attr = S_ISDIR(st.st_mode) ? 0x10 /*DIRECTORY*/ : 0x80;
+    }
+    uint64_t ft = (mtime + 11644473600ull) * 10000000ull;
+    *(uint32_t *)(b + 0x00) = attr;
+    *(uint32_t *)(b + 0x04) = (uint32_t)ft;         *(uint32_t *)(b + 0x08) = (uint32_t)(ft >> 32); // creation
+    *(uint32_t *)(b + 0x0C) = (uint32_t)ft;         *(uint32_t *)(b + 0x10) = (uint32_t)(ft >> 32); // access
+    *(uint32_t *)(b + 0x14) = (uint32_t)ft;         *(uint32_t *)(b + 0x18) = (uint32_t)(ft >> 32); // write
+    *(uint32_t *)(b + 0x1C) = (uint32_t)serial;
+    *(uint32_t *)(b + 0x20) = (uint32_t)(size >> 32); // nFileSizeHigh
+    *(uint32_t *)(b + 0x24) = (uint32_t)size;          // nFileSizeLow
+    *(uint32_t *)(b + 0x28) = links;
+    *(uint32_t *)(b + 0x2C) = (uint32_t)(ino >> 32);   // nFileIndexHigh
+    *(uint32_t *)(b + 0x30) = (uint32_t)ino;           // nFileIndexLow
+    return TRUE;
+}
 API(kernel32, GetFileSizeEx, 2) {
     Object *o = file_obj(ARG(0));
     if (!o) { set_last_error(ERROR_INVALID_HANDLE); return FALSE; }
@@ -403,10 +438,25 @@ API(kernel32, GetTempFileNameA, 4) {
     }
     return u;
 }
+// mkdir(host), creating missing parent directories on ENOENT. Games installed
+// into a writable folder often assume an intermediate dir (e.g. C:\game\Logs)
+// already exists; when C:\game is served from a read-only .asar, our extracted
+// code dir doesn't have it, so a non-recursive mkdir of Logs\<timestamp> fails
+// and the game treats that as fatal. Creating parents fixes the asar case and is
+// harmless for a real folder.
+static int mkdir_parents(const char *host) {
+    if (!mkdir(host, 0755)) return 0;
+    if (errno != ENOENT) return -1;
+    char tmp[PATH_MAX];
+    snprintf(tmp, sizeof tmp, "%s", host);
+    for (char *s = tmp + 1; *s; s++)
+        if (*s == '/') { *s = 0; mkdir(tmp, 0755); *s = '/'; }
+    return mkdir(host, 0755);
+}
 API(kernel32, CreateDirectoryA, 2) {
     char host[PATH_MAX];
     if (!vfs_to_host(STR(0), host, sizeof host)) { set_last_error(ERROR_PATH_NOT_FOUND); return FALSE; }
-    if (mkdir(host, 0755)) {
+    if (mkdir_parents(host)) {
         set_last_error(errno == EEXIST ? ERROR_ALREADY_EXISTS : win32_errno(errno));
         return FALSE;
     }
@@ -783,7 +833,7 @@ API(kernel32, CreateDirectoryW, 2) {
     char n[PATH_MAX], host[PATH_MAX];
     w2a(WSTR(0), n, sizeof n);
     if (!vfs_to_host(n, host, sizeof host)) { set_last_error(ERROR_PATH_NOT_FOUND); return FALSE; }
-    if (mkdir(host, 0755)) { set_last_error(errno == EEXIST ? ERROR_ALREADY_EXISTS : win32_errno(errno)); return FALSE; }
+    if (mkdir_parents(host)) { set_last_error(errno == EEXIST ? ERROR_ALREADY_EXISTS : win32_errno(errno)); return FALSE; }
     vfs_note_created(host, true);
     return TRUE;
 }

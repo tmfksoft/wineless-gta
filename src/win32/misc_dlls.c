@@ -140,3 +140,28 @@ API(winmm, mmioSetInfo, 3) { return 0xFFFFFFFFu; }
 API(winmm, mmioAdvance, 3) { return 0xFFFFFFFFu; }
 API(winmm, mmioDescend, 4) { return 0xFFFFFFFFu; }
 API(winmm, mmioAscend, 3) { return 0xFFFFFFFFu; }
+
+// iphlpapi: just enough for steam_api to read a MAC as part of its machine id.
+// GetAdaptersInfo(pAdapterInfo, pOutBufLen). IP_ADAPTER_INFO is 640 bytes on
+// 32-bit Windows; we return a single fake Ethernet adapter with a stable MAC.
+#define IP_ADAPTER_INFO_SIZE 640
+API(iphlpapi, GetAdaptersInfo, 2) {
+    uint32_t *outlen = ARG(1) ? PTR(1) : NULL;
+    if (!outlen) return 87; // ERROR_INVALID_PARAMETER
+    if (!ARG(0) || *outlen < IP_ADAPTER_INFO_SIZE) {
+        *outlen = IP_ADAPTER_INFO_SIZE;
+        return 111; // ERROR_BUFFER_OVERFLOW
+    }
+    uint8_t *a = PTR(0);
+    memset(a, 0, IP_ADAPTER_INFO_SIZE);
+    *(uint32_t *)(a + 0) = 0;                 // Next
+    strcpy((char *)(a + 8), "{WINELESS-ETH0}"); // AdapterName
+    strcpy((char *)(a + 268), "Wineless Ethernet Adapter"); // Description
+    *(uint32_t *)(a + 400) = 6;               // AddressLength
+    static const uint8_t mac[6] = {0x02, 0x42, 0xAC, 0x11, 0x00, 0x02};
+    memcpy(a + 404, mac, 6);                  // Address
+    *(uint32_t *)(a + 412) = 1;               // Index
+    *(uint32_t *)(a + 416) = 6;               // Type = MIB_IF_TYPE_ETHERNET
+    return 0; // ERROR_SUCCESS
+}
+API(iphlpapi, GetAdaptersAddresses, 5) { return 111; } // ERROR_BUFFER_OVERFLOW / no data

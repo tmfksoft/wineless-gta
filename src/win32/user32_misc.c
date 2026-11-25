@@ -235,3 +235,11 @@ API(shell32, SHFileOperationA, 1) {
     op[5] = 0; // fAnyOperationsAborted
     return err;
 }
+
+// DPI awareness: we render into an SDL/DXVK surface and scale ourselves, so DPI
+// awareness is a no-op. Report success / "aware" so games don't re-scale.
+API(user32, SetProcessDPIAware, 0) { return TRUE; }
+API(user32, SetProcessDpiAwarenessContext, 1) { return TRUE; }
+API(user32, IsProcessDPIAware, 0) { return TRUE; }
+API(user32, GetDpiForSystem, 0) { return 96; }
+API(user32, GetDpiForWindow, 1) { return 96; }
