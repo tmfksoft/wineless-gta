@@ -84,6 +84,37 @@ API(kernel32, LeaveCriticalSection, 1) {
     pthread_mutex_unlock(cs_get(cs));
     return 0;
 }
+// Condition variable on a critical section (Vista+). The variable is the same
+// guest-dword generation counter SleepConditionVariableSRW and the Wake* calls in
+// kernel32_vista.c use. It was missing: GTA:SA with SilentPatch asks for it
+// ("not found") just before crashing in EnterCriticalSection(0x20).
+// The section is released for the wait whatever its recursion depth and taken
+// back to the same depth, as Windows does.
+API(kernel32, SleepConditionVariableCS, 3) {
+    uint32_t *cv = PTR(0), *cs = PTR(1), ms = ARG(2);
+    uint32_t gen = __atomic_load_n(cv, __ATOMIC_ACQUIRE);
+    pthread_mutex_t *m = cs_get(cs);
+    uint32_t depth = cs[2] ? cs[2] : 1;
+    for (uint32_t i = 0; i < depth; i++) {
+        __atomic_sub_fetch(&cs[1], 1, __ATOMIC_SEQ_CST);
+        if (--cs[2] == 0) cs[3] = 0;
+        pthread_mutex_unlock(m);
+    }
+    uint32_t start = win32_tick_ms();
+    bool woke;
+    while (!(woke = __atomic_load_n(cv, __ATOMIC_ACQUIRE) != gen)) {
+        if (ms != 0xFFFFFFFF && win32_tick_ms() - start >= ms) break;
+        usleep(200);
+    }
+    for (uint32_t i = 0; i < depth; i++) {
+        pthread_mutex_lock(m);
+        cs[2]++;
+        cs[3] = thread_current()->tid;
+        __atomic_add_fetch(&cs[1], 1, __ATOMIC_SEQ_CST);
+    }
+    if (!woke) { set_last_error(0x5B4); return FALSE; } // ERROR_TIMEOUT
+    return TRUE;
+}
 
 // ---------------------------------------------------------------- interlocked
 API(kernel32, InterlockedIncrement, 1) { return __atomic_add_fetch((int32_t *)PTR(0), 1, __ATOMIC_SEQ_CST); }
