@@ -90,15 +90,13 @@ static uint64_t now_ns(void) {
 #define WL_PAUSE_NS (250ull * 1000000ull)
 
 // Present-path timing, logged every 5 s next to the bridge's own fps line, so a
-// slow game says where its frame time goes: its own work, the readback, the
-// D3D present itself (d3d9/d3d8 bridges report that via wl_present_timing), or
-// the vsync wait.
+// slow game says where its frame time goes: its own work, the readback, or the
+// vsync wait. (The bridges no longer do a real D3D present in core mode.)
 static struct {
     uint64_t window_start, last_present;
     unsigned presents, dropped;
-    double game_ms, readback_ms, vsync_ms, dpresent_ms, worst_gap_ms;
+    double game_ms, readback_ms, vsync_ms, worst_gap_ms;
 } pt;
-static void core_present_timing(double present_ms) { pt.dpresent_ms += present_ms; } // guest thread only
 
 static void present_stats(uint64_t t) {
     if (!pt.window_start) { pt.window_start = t; return; }
@@ -106,8 +104,8 @@ static void present_stats(uint64_t t) {
     if (win < 5.0) return;
     if (pt.presents) {
         double n = pt.presents;
-        LOGI("libretro: %.1f presents/s; per frame game %.1fms, readback %.1fms, d3d present %.1fms, vsync wait %.1fms; worst gap %.0fms; %u not taken",
-             n / win, pt.game_ms / n, pt.readback_ms / n, pt.dpresent_ms / n, pt.vsync_ms / n, pt.worst_gap_ms, pt.dropped);
+        LOGI("libretro: %.1f presents/s; per frame game %.1fms, readback %.1fms, vsync wait %.1fms; worst gap %.0fms; %u not taken",
+             n / win, pt.game_ms / n, pt.readback_ms / n, pt.vsync_ms / n, pt.worst_gap_ms, pt.dropped);
     }
     uint64_t lp = pt.last_present;
     memset(&pt, 0, sizeof pt);
@@ -196,8 +194,7 @@ static void core_present(wl_frame_reader reader, uint32_t w, uint32_t h) {
     pt.presents++;
     pt.last_present = t3;
     present_stats(t3);
-    // game_ms measures from here to the next present, so it excludes this wait;
-    // the bridge's D3D present happens in that window and is reported apart.
+    // game_ms measures from here to the next present, so it excludes this wait.
 }
 // Decoded intro movies pace themselves (dshow.c sleeps to the movie's rate).
 static void core_submit(const uint32_t *xrgb, uint32_t w, uint32_t h) {
@@ -326,7 +323,6 @@ void retro_deinit(void) {
     pthread_mutex_lock(&mx);
     wl_present_hook = NULL;
     wl_submit_frame = NULL;
-    wl_present_timing = NULL;
     shutting_down = true;
     pthread_cond_broadcast(&cv_run);
     pthread_mutex_unlock(&mx);
@@ -625,7 +621,6 @@ bool retro_load_game(const struct retro_game_info *game) {
     wl_core_mouse = 1;
     wl_present_hook = core_present;
     wl_submit_frame = core_submit;
-    wl_present_timing = core_present_timing;
     if (pthread_create(&guest_tid, NULL, guest_main, NULL) != 0) {
         LOGE("libretro: failed to start guest thread: %s", strerror(errno));
         wl_present_hook = NULL;

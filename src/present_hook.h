@@ -24,10 +24,6 @@ extern void (*wl_present_hook)(wl_frame_reader reader, uint32_t w, uint32_t h);
 // thread outside the guest's Present path. Set by the core; NULL in standalone.
 extern void (*wl_submit_frame)(const uint32_t *xrgb, uint32_t w, uint32_t h);
 
-// Set by the core; NULL in standalone. The bridges report how long the real D3D
-// present took (ms) after the hook returned, for the core's frame-time log.
-extern void (*wl_present_timing)(double present_ms);
-
 // ---- audio bridge (dsound.c) ----
 // When non-zero, dsound does NOT open its own output (SDL device / null thread);
 // the libretro core becomes the sole consumer of the mixer and pulls samples in

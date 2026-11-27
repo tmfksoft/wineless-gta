@@ -319,20 +319,18 @@ OVERRIDE(IDirect3DDevice8, Present, 5) {
         t_last = t;
         f_last = frame;
     }
+    // libretro core: the frame already went to the frontend through the hook, and
+    // the core paces the guest. Presenting to the headless window as well only
+    // costs time, and on NVIDIA nodes it crashes inside the driver
+    // (libnvidia-eglcore, signal 11 in IDirect3DDevice9::Present, every AoE2 HD
+    // session on thomas-gpu-server since v356). Nothing reads that window.
+    if (wl_present_hook) return D3D_OK;
     if (!wineless_window_presentable()) {
         struct timespec sl = {0, 16000000};
         nanosleep(&sl, nullptr);
         return D3D_OK;
     }
-    if (!wl_present_timing)
-        return (uint32_t)SELF(IDirect3DDevice8)->Present((const RECT *)G2H(g[1]), (const RECT *)G2H(g[2]), nullptr, nullptr);
-    // libretro core: report how long the real present takes, for its frame-time log.
-    struct timespec p0, p1;
-    clock_gettime(CLOCK_MONOTONIC, &p0);
-    HRESULT phr = SELF(IDirect3DDevice8)->Present((const RECT *)G2H(g[1]), (const RECT *)G2H(g[2]), nullptr, nullptr);
-    clock_gettime(CLOCK_MONOTONIC, &p1);
-    wl_present_timing((p1.tv_sec - p0.tv_sec) * 1e3 + (p1.tv_nsec - p0.tv_nsec) / 1e6);
-    return (uint32_t)phr;
+    return (uint32_t)SELF(IDirect3DDevice8)->Present((const RECT *)G2H(g[1]), (const RECT *)G2H(g[2]), nullptr, nullptr);
 }
 OVERRIDE(IDirect3DDevice8, CreateAdditionalSwapChain, 3) {
     GuestPP8 *gpp = (GuestPP8 *)G2H(g[1]);
