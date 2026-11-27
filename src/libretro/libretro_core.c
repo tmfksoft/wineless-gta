@@ -377,11 +377,59 @@ static void poll_input(void) {
     poll_mouse();
 }
 
+// ---- the cursor, reported up (PXS-281) ----
+//
+// What the game wants from the mouse (relative = capture the player's pointer),
+// whether it shows a cursor, and what that looks like, so the client can capture
+// or draw the cursor itself. A private environment call: Pixelstream's frontend
+// (libretro-frontend src/input/cursor_state.h, which owns this contract) answers
+// it; any other frontend says no, and the core stops asking.
+#define RETRO_ENVIRONMENT_PIXELSTREAM_SET_CURSOR_STATE (0x5058 | RETRO_ENVIRONMENT_PRIVATE)
+struct retro_pixelstream_cursor_state {
+    unsigned version;     // 1
+    unsigned mode;        // 0 unknown, 1 absolute, 2 relative
+    bool visible;
+    uint32_t image_id;    // 0 = no image
+    unsigned width, height;
+    int hot_x, hot_y;
+    const uint32_t *argb; // width*height 0xAARRGGBB, straight alpha, top row first; read during the call
+    const char *named;    // CSS keyword for a standard cursor, or NULL
+};
+
+// Sent on change only; the frontend repeats it for late joiners.
+static void report_cursor(void) {
+    static bool off, sent;
+    static wl_cursor_info last;
+    static uint32_t px[WL_CURSOR_MAX_SIDE * WL_CURSOR_MAX_SIDE];
+    static uint32_t have_id; // the image px holds
+    if (off || !env_cb) return;
+    wl_cursor_info c;
+    wl_cursor_query(&c, px, have_id);
+    if (c.image_id) have_id = c.image_id;
+    if (sent && c.relative == last.relative && c.visible == last.visible && c.image_id == last.image_id &&
+        c.named == last.named)
+        return;
+    struct retro_pixelstream_cursor_state s = {
+        1, c.relative ? 2u : 1u, c.visible != 0, c.image_id, c.w, c.h, c.hot_x, c.hot_y,
+        c.image_id ? px : NULL, c.named,
+    };
+    if (!env_cb(RETRO_ENVIRONMENT_PIXELSTREAM_SET_CURSOR_STATE, &s)) {
+        off = true;
+        LOGI("libretro: frontend does not take cursor reports");
+        return;
+    }
+    if (!sent || c.relative != last.relative)
+        LOGI("libretro: cursor mode %s", c.relative ? "relative" : "absolute");
+    last = c;
+    sent = true;
+}
+
 // ---- the core loop ----
 
 void retro_run(void) {
     if (input_poll_cb) input_poll_cb();
     poll_input();
+    report_cursor();
 
     // Wait briefly for a fresh guest frame; if none (guest loading / slow),
     // duplicate the last frame so the stream keeps flowing.

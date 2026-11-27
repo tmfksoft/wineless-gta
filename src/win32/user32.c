@@ -24,11 +24,13 @@
 typedef struct {
     char name[64];
     uint32_t wndproc, style, hinst;
+    uint32_t cursor; // hCursor: what the window shows until the game calls SetCursor
 } WndClass;
 
 typedef struct {
     uint32_t hwnd;
     uint32_t wndproc, style, exstyle, userdata, hinst, id;
+    uint32_t class_cursor;
     int32_t x, y, w, h;
     int visible;
     int dirty; // needs WM_PAINT (InvalidateRect until validated)
@@ -112,6 +114,7 @@ API(user32, RegisterClassA, 1) {
     c->style = wc[0];
     c->wndproc = wc[1];
     c->hinst = wc[4];
+    c->cursor = wc[6];
     snprintf(c->name, sizeof c->name, "%s", wc[9] >= 0x10000 ? (const char *)G2H(wc[9]) : "#atom");
     LOGD("RegisterClassA(%s, wndproc=0x%x)", c->name, c->wndproc);
     return 0xC000 + nclasses;
@@ -123,6 +126,7 @@ API(user32, RegisterClassW, 1) {
     c->style = wc[0];
     c->wndproc = wc[1];
     c->hinst = wc[4];
+    c->cursor = wc[6];
     if (wc[9] >= 0x10000) w2a(G2H(wc[9]), c->name, sizeof c->name);
     else snprintf(c->name, sizeof c->name, "#atom");
     LOGD("RegisterClassW(%s, wndproc=0x%x)", c->name, c->wndproc);
@@ -142,6 +146,7 @@ API(user32, CreateWindowExA, 12) {
     memset(w, 0, sizeof *w);
     w->hwnd = 0x00010010 + nwindows * 0x10;
     w->wndproc = c->wndproc;
+    w->class_cursor = c->cursor;
     w->exstyle = ARG(0);
     w->style = ARG(3);
     w->x = (int32_t)ARG(4) == (int32_t)0x80000000 ? 0 : (int32_t)ARG(4);
@@ -380,6 +385,11 @@ static SDL_Window *main_sdl(void) { return nwindows ? windows[0].sdl : NULL; }
 // system one, so we must not leave the Linux pointer on top.
 int wineless_d3d9_cursor_shown(void); // d3d9 bridge: a hardware cursor overlay is active
 static bool cursor_null;
+// The cursor report for the libretro core (PXS-281), defined with the core's mouse below.
+static void crep_set_cursor(uint32_t hcursor);
+static void crep_warp(int32_t x, int32_t y);
+static uint32_t crep_load_cursor(uint32_t hinst, uint32_t name);
+static void raw_post(int32_t dx, int32_t dy, uint16_t flags, uint16_t data);
 static void apply_cursor_visibility(void) {
     if (wineless_d3d9_cursor_shown()) return; // the D3D9 hardware cursor owns visibility
     if (cursor_count < 0 || cursor_null) SDL_HideCursor();
@@ -396,6 +406,7 @@ API(user32, ClipCursor, 1) {
 }
 API(user32, SetCursor, 1) {
     cursor_null = ARG(0) == 0;
+    crep_set_cursor(ARG(0));
     apply_cursor_visibility();
     return 0x00030000;
 }
@@ -509,6 +520,7 @@ API(user32, SetCursorPos, 2) {
         vcur_x = (int32_t)ARG(0);
         vcur_y = (int32_t)ARG(1);
         pthread_mutex_unlock(&vcur_lock);
+        crep_warp((int32_t)ARG(0), (int32_t)ARG(1));
         return TRUE;
     }
     Window *w = nwindows ? &windows[0] : NULL;
@@ -521,7 +533,7 @@ API(user32, SetCursorPos, 2) {
     return TRUE;
 }
 API(user32, LoadIconA, 2) { return 0x00020000 + (ARG(1) & 0xffff); }
-API(user32, LoadCursorA, 2) { return 0x00030000 + (ARG(1) & 0xffff); }
+API(user32, LoadCursorA, 2) { return crep_load_cursor(ARG(0), ARG(1)); }
 API(user32, SetTimer, 4) { return ARG(1) ? ARG(1) : 1; }
 API(user32, KillTimer, 2) { return TRUE; }
 API(user32, GetSystemMetrics, 1) {
@@ -727,11 +739,13 @@ void wl_cursor_set(int32_t x, int32_t y) {
     pthread_mutex_unlock(&vcur_lock);
     if (!dx && !dy) return;
     wl_mouse_move(dx, dy);
+    raw_post(dx, dy, 0, 0);
     post(windows[0].hwnd, 0x0200 /*WM_MOUSEMOVE*/, mouse_keys(), lp);
 }
 void wl_cursor_move(int dx, int dy) {
     if (!nwindows || (!dx && !dy)) return;
     wl_mouse_move(dx, dy); // raw, unclamped: what an FPS turning on DirectInput wants
+    raw_post(dx, dy, 0, 0);
     pthread_mutex_lock(&vcur_lock);
     vcur_x += dx;
     vcur_y += dy;
@@ -745,6 +759,7 @@ void wl_cursor_button(int btn, int down) {
     static const uint32_t msg[] = {0x0201, 0x0204, 0x0207, 0x020B, 0x020B};
     if (btn < 0 || btn > 4 || !nwindows) return;
     wl_mouse_button(btn, down);
+    raw_post(0, 0, (uint16_t)(1u << (btn * 2 + (down ? 0 : 1))), 0); // RI_MOUSE_*_DOWN / _UP
     pthread_mutex_lock(&vcur_lock);
     if (down) vcur_buttons |= mk[btn];
     else vcur_buttons &= ~mk[btn];
@@ -757,6 +772,7 @@ void wl_cursor_button(int btn, int down) {
 void wl_cursor_wheel(int notches, int horizontal) {
     if (!notches || !nwindows) return;
     if (!horizontal) wl_mouse_wheel_di(notches * 120);
+    raw_post(0, 0, horizontal ? 0x0800 /*RI_MOUSE_HWHEEL*/ : 0x0400 /*RI_MOUSE_WHEEL*/, (uint16_t)(notches * 120));
     pthread_mutex_lock(&vcur_lock);
     uint32_t lp = vcur_lparam_locked(); // client coords: the window sits at (0,0)
     pthread_mutex_unlock(&vcur_lock);
@@ -770,6 +786,346 @@ void wl_key_char(uint32_t c) {
         post(windows[0].hwnd, 0x0102, 0xD800 | (c >> 10), 1);
         post(windows[0].hwnd, 0x0102, 0xDC00 | (c & 0x3FF), 1);
     } else post(windows[0].hwnd, 0x0102 /*WM_CHAR*/, c, 1);
+}
+
+// ---- the cursor, reported up to the libretro core (PXS-281; present_hook.h) ----
+//
+// What the game wants from the mouse, so the client can pick pointer lock or an
+// absolute pointer, and what its cursor looks like, so the client can draw it
+// locally (a D3D hardware cursor never reaches the video at all). The guest
+// thread writes this state; the frontend thread reads it once a frame through
+// wl_cursor_query. Everything below is under crep_lock.
+static pthread_mutex_t crep_lock = PTHREAD_MUTEX_INITIALIZER;
+static bool crep_cur_set;      // SetCursor called at least once
+static uint32_t crep_cur;      // its last argument
+static int crep_di_exclusive;  // DirectInput mice acquired in exclusive mode
+static bool crep_raw_mouse;    // raw input registered for the mouse
+static bool crep_raw_capture;  // ... with RIDEV_NOLEGACY or RIDEV_CAPTUREMOUSE
+// Hide + recentre: SetCursorPos to the same point, again and again, while hidden.
+static bool crep_warp_latched;
+static int crep_warp_streak;
+static int32_t crep_warp_x, crep_warp_y;
+static uint32_t crep_warp_ms;
+
+// Images, by the handle the game holds (LoadCursor) or as the D3D hardware cursor.
+// Ids come from the pixels' hash, so a game re-setting the same image every frame,
+// or cycling an animation, does not make the frontend resend pixels.
+typedef struct {
+    uint32_t handle; // 0 = free; WL_CURSOR_HW for the D3D cursor
+    uint32_t id, hash;
+    uint32_t w, h;
+    int32_t hot_x, hot_y;
+    uint32_t *argb;
+} CurImg;
+#define WL_CURSOR_HW 0xFFFFFFFFu
+#define CREP_IMAGES 32
+static CurImg crep_img[CREP_IMAGES];
+static uint32_t crep_next_id = 1;
+static bool crep_hw_has_image;
+
+// IDC_* system cursors (LoadCursor(NULL, IDC_*)) as CSS keywords.
+static const char *crep_named(uint32_t hcursor) {
+    if ((hcursor & 0xFFFF0000u) != 0x00030000u) return NULL;
+    switch (hcursor & 0xFFFF) {
+    case 32512: return "default";     // IDC_ARROW
+    case 32513: return "text";        // IDC_IBEAM
+    case 32514: return "wait";        // IDC_WAIT
+    case 32515: return "crosshair";   // IDC_CROSS
+    case 32516: return "default";     // IDC_UPARROW
+    case 32642: return "nwse-resize"; // IDC_SIZENWSE
+    case 32643: return "nesw-resize"; // IDC_SIZENESW
+    case 32644: return "ew-resize";   // IDC_SIZEWE
+    case 32645: return "ns-resize";   // IDC_SIZENS
+    case 32646: return "move";        // IDC_SIZEALL
+    case 32648: return "not-allowed"; // IDC_NO
+    case 32649: return "pointer";     // IDC_HAND
+    case 32650: return "progress";    // IDC_APPSTARTING
+    case 32651: return "help";        // IDC_HELP
+    }
+    return NULL;
+}
+
+static uint32_t crep_hash(const uint32_t *argb, uint32_t w, uint32_t h, int32_t hx, int32_t hy) {
+    uint32_t x = 2166136261u;
+    uint32_t meta[4] = {w, h, (uint32_t)hx, (uint32_t)hy};
+    for (int i = 0; i < 4; i++) x = (x ^ meta[i]) * 16777619u;
+    for (size_t i = 0; i < (size_t)w * h; i++) x = (x ^ argb[i]) * 16777619u;
+    return x;
+}
+
+// Locked. Stores a copy under `handle` (replacing what it had), reusing the id
+// of an identical image already stored.
+static void crep_store_locked(uint32_t handle, const uint32_t *argb, uint32_t w, uint32_t h, int32_t hx,
+                              int32_t hy) {
+    if (!w || !h || w > WL_CURSOR_MAX_SIDE || h > WL_CURSOR_MAX_SIDE) return;
+    uint32_t hash = crep_hash(argb, w, h, hx, hy);
+    CurImg *slot = NULL, *same = NULL;
+    for (int i = 0; i < CREP_IMAGES; i++) {
+        if (crep_img[i].handle == handle) slot = &crep_img[i];
+        if (crep_img[i].handle && crep_img[i].hash == hash && crep_img[i].w == w && crep_img[i].h == h &&
+            !memcmp(crep_img[i].argb, argb, (size_t)w * h * 4))
+            same = &crep_img[i];
+    }
+    if (slot && same == slot) return; // unchanged
+    if (!slot)
+        for (int i = 0; i < CREP_IMAGES && !slot; i++)
+            if (!crep_img[i].handle) slot = &crep_img[i];
+    if (!slot) {
+        // Full: reuse the oldest-looking non-HW slot (games load a handful of cursors).
+        static int victim;
+        do victim = (victim + 1) % CREP_IMAGES; while (crep_img[victim].handle == WL_CURSOR_HW);
+        slot = &crep_img[victim];
+    }
+    uint32_t *px = realloc(slot->argb, (size_t)w * h * 4);
+    if (!px) return;
+    memcpy(px, argb, (size_t)w * h * 4);
+    slot->argb = px;
+    slot->handle = handle;
+    slot->id = same ? same->id : crep_next_id++;
+    slot->hash = hash;
+    slot->w = w;
+    slot->h = h;
+    slot->hot_x = hx;
+    slot->hot_y = hy;
+}
+
+static const CurImg *crep_find_locked(uint32_t handle) {
+    for (int i = 0; i < CREP_IMAGES; i++)
+        if (crep_img[i].handle == handle) return &crep_img[i];
+    return NULL;
+}
+
+static uint16_t rd16(const uint8_t *p) { uint16_t v; memcpy(&v, p, 2); return v; }
+static uint32_t rd32(const uint8_t *p) { uint32_t v; memcpy(&v, p, 4); return v; }
+
+// RT_GROUP_CURSOR `id` of module `mod` → ARGB (straight alpha, top row first).
+// Picks the entry nearest 32x32, deepest colour first. 0 when absent or unreadable.
+static int crep_decode_resource(uint32_t mod, uint32_t id, uint32_t **out, uint32_t *ow, uint32_t *oh,
+                                int32_t *ohx, int32_t *ohy) {
+    uint32_t gsz = 0, g = pe_find_resource(mod, 12 /*RT_GROUP_CURSOR*/, id, &gsz);
+    if (!g || gsz < 6) return 0;
+    const uint8_t *gp = G2H(g);
+    uint32_t count = rd16(gp + 4), best = 0, best_score = 0xFFFFFFFFu;
+    if (6 + count * 14 > gsz) return 0;
+    for (uint32_t i = 0; i < count; i++) {
+        const uint8_t *e = gp + 6 + i * 14;
+        uint32_t w = rd16(e), bpp = rd16(e + 6);
+        uint32_t score = (w > 32 ? w - 32 : 32 - w) * 64 + (32 - (bpp > 32 ? 32 : bpp));
+        if (score < best_score) { best_score = score; best = rd16(e + 12); }
+    }
+    uint32_t csz = 0, c = best ? pe_find_resource(mod, 1 /*RT_CURSOR*/, best, &csz) : 0;
+    if (!c || csz < 4 + 40) return 0;
+    const uint8_t *cp = G2H(c), *bih = cp + 4, *end = cp + csz;
+    uint32_t bisize = rd32(bih), w = rd32(bih + 4), bpp = rd16(bih + 14), used = rd32(bih + 32);
+    int32_t h2 = (int32_t)rd32(bih + 8);
+    uint32_t h = (uint32_t)(h2 < 0 ? -h2 : h2) / 2;
+    if (bisize < 40 || !w || !h || w > WL_CURSOR_MAX_SIDE || h > WL_CURSOR_MAX_SIDE) return 0;
+    if (bpp != 1 && bpp != 4 && bpp != 8 && bpp != 24 && bpp != 32) return 0;
+    uint32_t ncol = bpp <= 8 ? (used && used <= (1u << bpp) ? used : 1u << bpp) : 0;
+    const uint8_t *pal = bih + bisize, *xr = pal + ncol * 4;
+    uint32_t xstride = (w * bpp + 31) / 32 * 4, astride = (w + 31) / 32 * 4;
+    const uint8_t *an = xr + (size_t)xstride * h;
+    if (an + (size_t)astride * h > end) return 0;
+    uint32_t *px = malloc((size_t)w * h * 4);
+    if (!px) return 0;
+    bool any_alpha = false;
+    for (uint32_t y = 0; y < h; y++) {
+        uint32_t sy = h2 > 0 ? h - 1 - y : y; // DIBs are bottom-up unless the height is negative
+        const uint8_t *xrow = xr + (size_t)sy * xstride, *arow = an + (size_t)sy * astride;
+        for (uint32_t x = 0; x < w; x++) {
+            uint32_t rgb, a = 0xFF;
+            if (bpp == 32) {
+                rgb = rd32(xrow + x * 4) & 0xFFFFFF;
+                a = xrow[x * 4 + 3];
+                if (a) any_alpha = true;
+            } else if (bpp == 24) {
+                const uint8_t *q = xrow + x * 3;
+                rgb = (uint32_t)q[2] << 16 | (uint32_t)q[1] << 8 | q[0];
+            } else {
+                uint32_t idx = bpp == 8 ? xrow[x]
+                             : bpp == 4 ? (xrow[x / 2] >> (x & 1 ? 0 : 4)) & 15
+                                        : (xrow[x / 8] >> (7 - (x & 7))) & 1;
+                rgb = idx < ncol ? rd32(pal + idx * 4) & 0xFFFFFF : 0;
+            }
+            bool mask = (arow[x / 8] >> (7 - (x & 7))) & 1;
+            if (bpp != 32 && mask) {
+                // AND set: transparent over black, screen-inverting otherwise. A CSS
+                // cursor cannot invert, so draw those pixels black (I-beam on a light field).
+                a = rgb ? 0xFF : 0;
+                rgb = 0;
+            }
+            px[(size_t)y * w + x] = a << 24 | rgb;
+        }
+    }
+    if (bpp == 32 && !any_alpha) // an old 32-bit cursor with no alpha: the AND mask is the alpha
+        for (uint32_t y = 0; y < h; y++) {
+            const uint8_t *arow = an + (size_t)(h2 > 0 ? h - 1 - y : y) * astride;
+            for (uint32_t x = 0; x < w; x++)
+                if (!((arow[x / 8] >> (7 - (x & 7))) & 1)) px[(size_t)y * w + x] |= 0xFF000000u;
+        }
+    *out = px;
+    *ow = w;
+    *oh = h;
+    *ohx = (int32_t)rd16(cp);
+    *ohy = (int32_t)rd16(cp + 2);
+    return 1;
+}
+
+// LoadCursorA/W. The handle is what it always was; a cursor resource the game
+// ships is also decoded, so the client can draw it.
+static uint32_t crep_load_cursor(uint32_t hinst, uint32_t name) {
+    uint32_t handle = 0x00030000 + (name & 0xffff);
+    if (!hinst || name >= 0x10000) return handle; // system cursor, or a resource by name (not read)
+    uint32_t *px, w, h;
+    int32_t hx, hy;
+    if (crep_decode_resource(hinst, name, &px, &w, &h, &hx, &hy)) {
+        pthread_mutex_lock(&crep_lock);
+        crep_store_locked(handle, px, w, h, hx, hy);
+        pthread_mutex_unlock(&crep_lock);
+        free(px);
+        LOGD("cursor: resource %u decoded (%ux%u, hotspot %d,%d)", name, w, h, hx, hy);
+    }
+    return handle;
+}
+
+static void crep_set_cursor(uint32_t hcursor) {
+    pthread_mutex_lock(&crep_lock);
+    crep_cur_set = true;
+    crep_cur = hcursor;
+    pthread_mutex_unlock(&crep_lock);
+}
+
+static bool crep_visible(void) {
+    if (wineless_d3d9_cursor_shown()) return true;
+    return !(cursor_count < 0 || cursor_null);
+}
+
+static void crep_warp(int32_t x, int32_t y) {
+    uint32_t now = win32_tick_ms();
+    pthread_mutex_lock(&crep_lock);
+    if (crep_visible()) {
+        crep_warp_streak = 0;
+    } else {
+        bool same = crep_warp_streak && abs(x - crep_warp_x) <= 1 && abs(y - crep_warp_y) <= 1 &&
+                    now - crep_warp_ms < 250;
+        crep_warp_streak = same ? crep_warp_streak + 1 : 1;
+        // Three in a row is a game steering by recentring, not one placing the cursor.
+        if (crep_warp_streak >= 3) crep_warp_latched = true;
+    }
+    crep_warp_x = x;
+    crep_warp_y = y;
+    crep_warp_ms = now;
+    pthread_mutex_unlock(&crep_lock);
+}
+
+void wl_cursor_di_exclusive(int delta) {
+    pthread_mutex_lock(&crep_lock);
+    crep_di_exclusive += delta;
+    if (crep_di_exclusive < 0) crep_di_exclusive = 0;
+    pthread_mutex_unlock(&crep_lock);
+}
+
+void wl_cursor_hw_image(const uint32_t *argb, uint32_t w, uint32_t h, int32_t hot_x, int32_t hot_y) {
+    pthread_mutex_lock(&crep_lock);
+    crep_store_locked(WL_CURSOR_HW, argb, w, h, hot_x, hot_y);
+    crep_hw_has_image = crep_find_locked(WL_CURSOR_HW) != NULL;
+    pthread_mutex_unlock(&crep_lock);
+}
+
+void wl_cursor_query(wl_cursor_info *out, uint32_t *argb, uint32_t have_id) {
+    memset(out, 0, sizeof *out);
+    pthread_mutex_lock(&crep_lock);
+    bool hw = wineless_d3d9_cursor_shown();
+    out->visible = crep_visible();
+    // A shown cursor ends the hide-and-recentre guess: the game is pointing again.
+    if (out->visible) crep_warp_latched = false, crep_warp_streak = 0;
+    out->relative = crep_di_exclusive > 0 || crep_raw_capture || crep_warp_latched;
+
+    const CurImg *img = NULL;
+    uint32_t handle = 0;
+    if (hw && crep_hw_has_image) {
+        img = crep_find_locked(WL_CURSOR_HW);
+    } else {
+        handle = crep_cur_set ? crep_cur : (nwindows ? windows[0].class_cursor : 0);
+        if (handle) img = crep_find_locked(handle);
+    }
+    if (img) {
+        out->image_id = img->id;
+        out->w = img->w;
+        out->h = img->h;
+        out->hot_x = img->hot_x;
+        out->hot_y = img->hot_y;
+        if (img->id != have_id && argb) memcpy(argb, img->argb, (size_t)img->w * img->h * 4);
+    } else if (handle) {
+        out->named = crep_named(handle);
+    }
+    pthread_mutex_unlock(&crep_lock);
+}
+
+// ---- raw input, the mouse only ----
+// Games that register for raw mouse input read WM_INPUT; with NOLEGACY or
+// CAPTUREMOUSE they also want the pointer captured. The motion is the core's (the
+// same deltas DirectInput gets). Legacy WM_MOUSE* still go out: the games that
+// ask for NOLEGACY ignore them.
+typedef struct { int32_t dx, dy; uint16_t flags, data; } RawMouse;
+static RawMouse raw_ring[256];
+static uint32_t raw_seq;
+#define RAW_HANDLE_BASE 0x00600000u
+
+static void raw_post(int32_t dx, int32_t dy, uint16_t flags, uint16_t data) {
+    if (!nwindows) return;
+    pthread_mutex_lock(&crep_lock);
+    bool on = crep_raw_mouse;
+    uint32_t idx = raw_seq++ & 255;
+    if (on) raw_ring[idx] = (RawMouse){dx, dy, flags, data};
+    pthread_mutex_unlock(&crep_lock);
+    if (on) post(windows[0].hwnd, 0x00FF /*WM_INPUT*/, 0 /*RIM_INPUT*/, RAW_HANDLE_BASE | idx);
+}
+
+// RegisterRawInputDevices(RAWINPUTDEVICE *, count, cbSize): {usage page, usage, flags, hwnd}.
+API(user32, RegisterRawInputDevices, 3) {
+    const uint8_t *d = PTR(0);
+    uint32_t n = ARG(1), sz = ARG(2) ? ARG(2) : 12;
+    if (!d || sz < 12) return FALSE;
+    pthread_mutex_lock(&crep_lock);
+    for (uint32_t i = 0; i < n; i++, d += sz) {
+        uint16_t page = rd16(d), usage = rd16(d + 2);
+        uint32_t flags = rd32(d + 4);
+        LOGD("RegisterRawInputDevices(page %u usage %u flags 0x%x)", page, usage, flags);
+        if (page != 1 || usage != 2) continue; // only the mouse is produced
+        if (flags & 0x1 /*RIDEV_REMOVE*/) {
+            crep_raw_mouse = crep_raw_capture = false;
+        } else {
+            crep_raw_mouse = true;
+            crep_raw_capture = (flags & (0x30 /*RIDEV_NOLEGACY*/ | 0x200 /*RIDEV_CAPTUREMOUSE*/)) != 0;
+        }
+    }
+    pthread_mutex_unlock(&crep_lock);
+    return TRUE;
+}
+
+// GetRawInputData(HRAWINPUT, command, data, *size, header size). RAWINPUT for a
+// 32-bit process: a 16-byte header, then RAWMOUSE (24 bytes).
+API(user32, GetRawInputData, 5) {
+    uint32_t h = ARG(0), cmd = ARG(1), *pcb = PTR(3);
+    if ((h & 0xFFFFFF00u) != RAW_HANDLE_BASE || !pcb) return 0xFFFFFFFFu;
+    uint32_t need = cmd == 0x10000005 /*RID_HEADER*/ ? 16 : 40;
+    if (!ARG(2)) { *pcb = need; return 0; }
+    if (*pcb < need) return 0xFFFFFFFFu;
+    pthread_mutex_lock(&crep_lock);
+    RawMouse r = raw_ring[h & 255];
+    pthread_mutex_unlock(&crep_lock);
+    uint8_t *o = PTR(2);
+    memset(o, 0, need);
+    uint32_t hdr[4] = {0 /*RIM_TYPEMOUSE*/, 40, 0x00610001u /*hDevice*/, 0};
+    memcpy(o, hdr, 16);
+    if (need == 40) {
+        memcpy(o + 20, &r.flags, 2); // usFlags stays MOUSE_MOVE_RELATIVE (0)
+        memcpy(o + 22, &r.data, 2);
+        memcpy(o + 28, &r.dx, 4);
+        memcpy(o + 32, &r.dy, 4);
+    }
+    return need;
 }
 
 // The game's view of its window always matches the resolution it picked; the
@@ -1079,7 +1435,7 @@ API(user32, InvalidateRect, 3) {
         for (int i = 0; i < nwindows; i++) windows[i].dirty = 1;
     return TRUE;
 }
-API(user32, LoadCursorW, 2) { return 0x00030000 + (ARG(1) & 0xffff); }
+API(user32, LoadCursorW, 2) { return crep_load_cursor(ARG(0), ARG(1)); }
 API(user32, LoadImageW, 6) { return 0; }
 API(user32, DestroyIcon, 1) { return TRUE; }
 API(user32, DrawIconEx, 9) { return TRUE; }
@@ -1097,6 +1453,7 @@ API(user32, RegisterClassExA, 1) {
     c->style = wc[1];
     c->wndproc = wc[2];
     c->hinst = wc[5];
+    c->cursor = wc[7];
     snprintf(c->name, sizeof c->name, "%s", wc[10] >= 0x10000 ? (const char *)G2H(wc[10]) : "#atom");
     LOGD("RegisterClassExA(%s, wndproc=0x%x)", c->name, c->wndproc);
     return 0xC000 + nclasses;
@@ -1108,6 +1465,7 @@ API(user32, RegisterClassExW, 1) {
     c->style = wc[1];
     c->wndproc = wc[2];
     c->hinst = wc[5];
+    c->cursor = wc[7];
     if (wc[10] >= 0x10000) w2a(G2H(wc[10]), c->name, sizeof c->name);
     else snprintf(c->name, sizeof c->name, "#atom");
     LOGD("RegisterClassExW(%s, wndproc=0x%x)", c->name, c->wndproc);

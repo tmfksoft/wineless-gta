@@ -23,6 +23,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <vector>
 
 extern "C" {
 uint32_t d3d9_bridge_create(uint32_t sdk);
@@ -469,6 +470,17 @@ OVERRIDE(IDirect3DDevice9, SetCursorProperties, 4) {
     surf->GetDesc(&d);
     D3DLOCKED_RECT lr;
     if (SUCCEEDED(surf->LockRect(&lr, nullptr, D3DLOCK_READONLY))) {
+        // The libretro core draws no SDL cursor: hand the image up to the client (PXS-281).
+        if ((d.Format == D3DFMT_A8R8G8B8 || d.Format == D3DFMT_X8R8G8B8) && d.Width <= WL_CURSOR_MAX_SIDE &&
+            d.Height <= WL_CURSOR_MAX_SIDE) {
+            std::vector<uint32_t> px((size_t)d.Width * d.Height);
+            for (uint32_t y = 0; y < d.Height; y++) {
+                memcpy(&px[(size_t)y * d.Width], (uint8_t *)lr.pBits + (size_t)y * lr.Pitch, (size_t)d.Width * 4);
+                if (d.Format == D3DFMT_X8R8G8B8)
+                    for (uint32_t x = 0; x < d.Width; x++) px[(size_t)y * d.Width + x] |= 0xFF000000u;
+            }
+            wl_cursor_hw_image(px.data(), d.Width, d.Height, (int32_t)g[1], (int32_t)g[2]);
+        }
         SDL_Surface *s = SDL_CreateSurface(d.Width, d.Height, SDL_PIXELFORMAT_ARGB8888);
         if (s) {
             for (uint32_t y = 0; y < d.Height; y++)
