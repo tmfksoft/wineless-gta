@@ -55,8 +55,10 @@ jobs:
       paths:
       - dist/wineless_libretro.so
       expire-in: 2 weeks
+  # Not gated on `protected`, unlike the other cores: this repository's main has no branch rule,
+  # because it is synced from GitHub by hand and a rule would refuse that push.
   publish-core:
-    if: (event == 'push' || event == 'manual') && branch == 'main' && protected && !merge_queue
+    if: (event == 'push' || event == 'manual') && branch == 'main' && !merge_queue
     needs:
     - build
     image: alpine:3.24
