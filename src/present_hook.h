@@ -42,6 +42,28 @@ void wl_key_set(unsigned dik, int down);
 // Relative mouse motion (camera/aim) and mouse buttons (0=L,1=R,2=M).
 void wl_mouse_move(int dx, int dy);
 void wl_mouse_button(int btn, int down);
+// DirectInput wheel, in WHEEL_DELTA units (120 per notch).
+void wl_mouse_wheel_di(int dz);
+
+// ---- keyboard and mouse as a desk (user32.c), for frontends that send them ----
+// When set (before the guest boots), the cursor is virtual: GetCursorPos /
+// SetCursorPos / ClipCursor act on a position the core drives, rather than on
+// SDL's pointer, which the libretro core never has. 0 in standalone.
+extern int wl_core_mouse;
+// Move the cursor to (x, y) in the game's own resolution. Posts WM_MOUSEMOVE and
+// feeds the delta to DirectInput, so cursor-polling and DI-reading games agree.
+void wl_cursor_set(int32_t x, int32_t y);
+// Move the cursor by (dx, dy) game pixels (captured mouse): DirectInput gets the
+// raw motion; the cursor is integrated and clamped to the game's window.
+void wl_cursor_move(int dx, int dy);
+// Mouse button 0=L, 1=R, 2=M, 3=X1, 4=X2 at the cursor: window message + DI.
+void wl_cursor_button(int btn, int down);
+// One wheel notch up (+1) or down (-1); horizontal when `horizontal`.
+void wl_cursor_wheel(int notches, int horizontal);
+// The game's resolution, for scaling the frontend's absolute pointer.
+void wl_game_size(int32_t *w, int32_t *h);
+// One typed character (a Unicode code point) as WM_CHAR, after its WM_KEYDOWN.
+void wl_key_char(uint32_t codepoint);
 
 // ---- native virtual gamepad (dinput_pad.c) ----
 // When set (before the guest boots), a virtual Xbox-style pad is attached so the

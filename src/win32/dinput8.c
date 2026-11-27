@@ -198,8 +198,12 @@ void wl_key_set(unsigned dik, int down) {
     uint32_t vk = dik_to_vk(dik);
     if (!vk) return;
     uint32_t lp = 1 | ((dik & 0x7f) << 16) | (dik & 0x80 ? 0x01000000u : 0);
-    if (down) user32_post(user32_main_hwnd(), 0x0100 /*WM_KEYDOWN*/, vk, lp);
-    else      user32_post(user32_main_hwnd(), 0x0101 /*WM_KEYUP*/,  vk, lp | 0xC0000000u);
+    // Windows sends WM_SYSKEY* for Alt itself, F10, and any key while Alt is down.
+    int sys = vk == 0x12 || vk == 0x79 || key_down[0x38] || key_down[0xB8];
+    uint32_t base = sys ? 0x0104 /*WM_SYSKEYDOWN*/ : 0x0100 /*WM_KEYDOWN*/;
+    if (sys && (key_down[0x38] || key_down[0xB8])) lp |= 0x20000000u; // context code: Alt held
+    if (down) user32_post(user32_main_hwnd(), base, vk, lp);
+    else      user32_post(user32_main_hwnd(), base + 1, vk, lp | 0xC0000000u);
 }
 
 // libretro core: accumulate a relative mouse motion (DirectInput reads and
@@ -210,12 +214,24 @@ void wl_mouse_move(int dx, int dy) {
     mouse_dy += dy;
     pthread_mutex_unlock(&in_lock);
 }
+void wl_mouse_wheel_di(int dz) {
+    pthread_mutex_lock(&in_lock);
+    mouse_dz += dz;
+    pthread_mutex_unlock(&in_lock);
+}
 // libretro core: set a mouse button (0=left, 1=right, 2=middle).
 void wl_mouse_button(int btn, int down) {
     if (btn < 0 || btn >= 8) return;
     pthread_mutex_lock(&in_lock);
     mouse_btn[btn] = down ? 0x80 : 0;
     pthread_mutex_unlock(&in_lock);
+}
+
+int wl_key_is_down(unsigned dik) {
+    pthread_mutex_lock(&in_lock);
+    int d = key_down[dik & 0xff] != 0;
+    pthread_mutex_unlock(&in_lock);
+    return d;
 }
 
 static int vk_down(uint32_t vk) {

@@ -9,6 +9,7 @@
 
 #include "../heap.h"
 #include "../pe.h"
+#include "../present_hook.h"
 #include "display.h"
 #include "guest_printf.h"
 #include "win32.h"
@@ -43,6 +44,13 @@ static int nclasses;
 static Window windows[8];
 static int nwindows;
 static int cursor_count;
+
+// The libretro core's cursor (see present_hook.h). Game coordinates; written by
+// the frontend thread, read by the guest, so under its own lock.
+int wl_core_mouse = 0;
+static pthread_mutex_t vcur_lock = PTHREAD_MUTEX_INITIALIZER;
+static int32_t vcur_x, vcur_y;
+static uint32_t vcur_buttons; // MK_LBUTTON 0x1, MK_RBUTTON 0x2, MK_MBUTTON 0x10, MK_XBUTTON1/2 0x20/0x40
 static uint32_t focus_hwnd, capture_hwnd;
 
 void user32_init(void) {}
@@ -481,12 +489,28 @@ static void mouse_to_game(Window *w, float x, float y, int32_t *gx, int32_t *gy)
 // The game window sits at screen (0,0) in the game's view, so screen = client.
 API(user32, GetCursorPos, 1) {
     int32_t *p = PTR(0);
+    if (wl_core_mouse) {
+        pthread_mutex_lock(&vcur_lock);
+        p[0] = vcur_x;
+        p[1] = vcur_y;
+        pthread_mutex_unlock(&vcur_lock);
+        return TRUE;
+    }
     float x = 0, y = 0;
     SDL_GetMouseState(&x, &y);
     mouse_to_game(nwindows ? &windows[0] : NULL, x, y, &p[0], &p[1]);
     return TRUE;
 }
 API(user32, SetCursorPos, 2) {
+    if (wl_core_mouse) {
+        // The FPS "warp to centre" trick: moves the cursor the game reads, not the
+        // player's hand. No WM_MOUSEMOVE, as on Windows when it is the game's own.
+        pthread_mutex_lock(&vcur_lock);
+        vcur_x = (int32_t)ARG(0);
+        vcur_y = (int32_t)ARG(1);
+        pthread_mutex_unlock(&vcur_lock);
+        return TRUE;
+    }
     Window *w = nwindows ? &windows[0] : NULL;
     if (!w || !w->sdl || !(SDL_GetWindowFlags(w->sdl) & SDL_WINDOW_INPUT_FOCUS)) return TRUE;
     int ww, wh;
@@ -570,7 +594,15 @@ static void mouse_to_game(Window *w, float x, float y, int32_t *gx, int32_t *gy)
     *gy = wh > 0 && w->h > 0 ? (int32_t)(y * w->h / wh) : (int32_t)y;
 }
 // MK_* flags for mouse messages' wParam
+int wl_key_is_down(unsigned dik); // dinput8.c
 static uint32_t mouse_keys(void) {
+    if (wl_core_mouse) {
+        pthread_mutex_lock(&vcur_lock);
+        uint32_t b = vcur_buttons;
+        pthread_mutex_unlock(&vcur_lock);
+        return b | (wl_key_is_down(0x2A) || wl_key_is_down(0x36) ? 0x4 : 0) |
+               (wl_key_is_down(0x1D) || wl_key_is_down(0x9D) ? 0x8 : 0);
+    }
     SDL_MouseButtonFlags b = SDL_GetMouseState(NULL, NULL);
     SDL_Keymod m = SDL_GetModState();
     return (b & SDL_BUTTON_LMASK ? 0x1 : 0) | (b & SDL_BUTTON_RMASK ? 0x2 : 0) | (m & SDL_KMOD_SHIFT ? 0x4 : 0) |
@@ -667,6 +699,77 @@ static void pump_sdl(void) {
             break;
         }
     }
+}
+
+// ---- the libretro core's mouse (present_hook.h) ----
+void wl_game_size(int32_t *w, int32_t *h) {
+    *w = nwindows && windows[0].w > 0 ? windows[0].w : 640;
+    *h = nwindows && windows[0].h > 0 ? windows[0].h : 480;
+}
+static uint32_t vcur_lparam_locked(void) { return ((uint32_t)vcur_y << 16) | ((uint32_t)vcur_x & 0xffff); }
+static void vcur_clamp_locked(void) {
+    int32_t w, h;
+    wl_game_size(&w, &h);
+    if (vcur_x < 0) vcur_x = 0;
+    if (vcur_y < 0) vcur_y = 0;
+    if (vcur_x > w - 1) vcur_x = w - 1;
+    if (vcur_y > h - 1) vcur_y = h - 1;
+}
+void wl_cursor_set(int32_t x, int32_t y) {
+    if (!nwindows) return;
+    pthread_mutex_lock(&vcur_lock);
+    int32_t ox = vcur_x, oy = vcur_y;
+    vcur_x = x;
+    vcur_y = y;
+    vcur_clamp_locked();
+    int dx = vcur_x - ox, dy = vcur_y - oy;
+    uint32_t lp = vcur_lparam_locked();
+    pthread_mutex_unlock(&vcur_lock);
+    if (!dx && !dy) return;
+    wl_mouse_move(dx, dy);
+    post(windows[0].hwnd, 0x0200 /*WM_MOUSEMOVE*/, mouse_keys(), lp);
+}
+void wl_cursor_move(int dx, int dy) {
+    if (!nwindows || (!dx && !dy)) return;
+    wl_mouse_move(dx, dy); // raw, unclamped: what an FPS turning on DirectInput wants
+    pthread_mutex_lock(&vcur_lock);
+    vcur_x += dx;
+    vcur_y += dy;
+    vcur_clamp_locked();
+    uint32_t lp = vcur_lparam_locked();
+    pthread_mutex_unlock(&vcur_lock);
+    post(windows[0].hwnd, 0x0200 /*WM_MOUSEMOVE*/, mouse_keys(), lp);
+}
+void wl_cursor_button(int btn, int down) {
+    static const uint32_t mk[] = {0x1, 0x2, 0x10, 0x20, 0x40};
+    static const uint32_t msg[] = {0x0201, 0x0204, 0x0207, 0x020B, 0x020B};
+    if (btn < 0 || btn > 4 || !nwindows) return;
+    wl_mouse_button(btn, down);
+    pthread_mutex_lock(&vcur_lock);
+    if (down) vcur_buttons |= mk[btn];
+    else vcur_buttons &= ~mk[btn];
+    uint32_t lp = vcur_lparam_locked();
+    pthread_mutex_unlock(&vcur_lock);
+    uint32_t wp = mouse_keys();
+    if (btn >= 3) wp |= (uint32_t)(btn == 3 ? 1 : 2) << 16; // XBUTTON1 / XBUTTON2
+    post(windows[0].hwnd, msg[btn] + (down ? 0 : 1), wp, lp);
+}
+void wl_cursor_wheel(int notches, int horizontal) {
+    if (!notches || !nwindows) return;
+    if (!horizontal) wl_mouse_wheel_di(notches * 120);
+    pthread_mutex_lock(&vcur_lock);
+    uint32_t lp = vcur_lparam_locked(); // client coords: the window sits at (0,0)
+    pthread_mutex_unlock(&vcur_lock);
+    post(windows[0].hwnd, horizontal ? 0x020E /*WM_MOUSEHWHEEL*/ : 0x020A /*WM_MOUSEWHEEL*/,
+         ((uint32_t)(notches * 120) << 16) | mouse_keys(), lp);
+}
+void wl_key_char(uint32_t c) {
+    if (!c || !nwindows || c > 0x10FFFF || (c >= 0xD800 && c <= 0xDFFF)) return;
+    if (c >= 0x10000) {
+        c -= 0x10000;
+        post(windows[0].hwnd, 0x0102, 0xD800 | (c >> 10), 1);
+        post(windows[0].hwnd, 0x0102, 0xDC00 | (c & 0x3FF), 1);
+    } else post(windows[0].hwnd, 0x0102 /*WM_CHAR*/, c, 1);
 }
 
 // The game's view of its window always matches the resolution it picked; the

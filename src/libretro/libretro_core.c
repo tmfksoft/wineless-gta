@@ -8,7 +8,10 @@
 // frontend thread consumes the latest frame, emits it via video_refresh, and
 // releases the guest for the next one.
 //
-// Not yet (P3): input and audio are still stubbed (silence; no input routing).
+// Input: the RetroPad drives a virtual Xbox pad (plus a few menu keys), and a
+// frontend that sends a keyboard and mouse (RETRO_DEVICE_KEYBOARD via the
+// keyboard callback, RETRO_DEVICE_MOUSE, RETRO_DEVICE_POINTER) drives the guest's
+// keyboard and a virtual cursor, as window messages and DirectInput state both.
 //
 // Build: -DBUILD_LIBRETRO=ON produces wineless_libretro.so. The standalone
 // wineless-gta executable does not include this file.
@@ -109,10 +112,109 @@ static void core_submit(const uint32_t *xrgb, uint32_t w, uint32_t h) {
 
 // ---- mandatory libretro API ----
 
+// ---- keyboard (RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK) ----
+
+// libretro RETROK_* -> DirectInput DIK (= the Windows set-1 scan code, 0x80 for
+// the extended keys). 0 = no Windows key for it.
+static uint8_t retrok_to_dik(unsigned k) {
+    if (k >= RETROK_a && k <= RETROK_z) {
+        static const uint8_t letters[26] = {
+            0x1E, 0x30, 0x2E, 0x20, 0x12, 0x21, 0x22, 0x23, 0x17, 0x24, 0x25, 0x26, 0x32,
+            0x31, 0x18, 0x19, 0x10, 0x13, 0x1F, 0x14, 0x16, 0x2F, 0x11, 0x2D, 0x15, 0x2C};
+        return letters[k - RETROK_a];
+    }
+    if (k >= RETROK_1 && k <= RETROK_9) return (uint8_t)(0x02 + (k - RETROK_1));
+    if (k >= RETROK_F1 && k <= RETROK_F10) return (uint8_t)(0x3B + (k - RETROK_F1));
+    switch (k) {
+    case RETROK_0: return 0x0B;
+    case RETROK_ESCAPE: return 0x01;
+    case RETROK_MINUS: return 0x0C;
+    case RETROK_EQUALS: return 0x0D;
+    case RETROK_BACKSPACE: return 0x0E;
+    case RETROK_TAB: return 0x0F;
+    case RETROK_LEFTBRACKET: return 0x1A;
+    case RETROK_RIGHTBRACKET: return 0x1B;
+    case RETROK_RETURN: return 0x1C;
+    case RETROK_LCTRL: return 0x1D;
+    case RETROK_SEMICOLON: return 0x27;
+    case RETROK_QUOTE: return 0x28;
+    case RETROK_BACKQUOTE: return 0x29;
+    case RETROK_LSHIFT: return 0x2A;
+    case RETROK_BACKSLASH: return 0x2B;
+    case RETROK_COMMA: return 0x33;
+    case RETROK_PERIOD: return 0x34;
+    case RETROK_SLASH: return 0x35;
+    case RETROK_RSHIFT: return 0x36;
+    case RETROK_KP_MULTIPLY: return 0x37;
+    case RETROK_LALT: return 0x38;
+    case RETROK_SPACE: return 0x39;
+    case RETROK_CAPSLOCK: return 0x3A;
+    case RETROK_NUMLOCK: return 0x45;
+    case RETROK_SCROLLOCK: return 0x46;
+    case RETROK_KP7: return 0x47;
+    case RETROK_KP8: return 0x48;
+    case RETROK_KP9: return 0x49;
+    case RETROK_KP_MINUS: return 0x4A;
+    case RETROK_KP4: return 0x4B;
+    case RETROK_KP5: return 0x4C;
+    case RETROK_KP6: return 0x4D;
+    case RETROK_KP_PLUS: return 0x4E;
+    case RETROK_KP1: return 0x4F;
+    case RETROK_KP2: return 0x50;
+    case RETROK_KP3: return 0x51;
+    case RETROK_KP0: return 0x52;
+    case RETROK_KP_PERIOD: return 0x53;
+    case RETROK_OEM_102: return 0x56;
+    case RETROK_F11: return 0x57;
+    case RETROK_F12: return 0x58;
+    case RETROK_KP_ENTER: return 0x9C;
+    case RETROK_RCTRL: return 0x9D;
+    case RETROK_KP_DIVIDE: return 0xB5;
+    case RETROK_PRINT: return 0xB7;
+    case RETROK_RALT: return 0xB8;
+    case RETROK_PAUSE: return 0xC5;
+    case RETROK_HOME: return 0xC7;
+    case RETROK_UP: return 0xC8;
+    case RETROK_PAGEUP: return 0xC9;
+    case RETROK_LEFT: return 0xCB;
+    case RETROK_RIGHT: return 0xCD;
+    case RETROK_END: return 0xCF;
+    case RETROK_DOWN: return 0xD0;
+    case RETROK_PAGEDOWN: return 0xD1;
+    case RETROK_INSERT: return 0xD2;
+    case RETROK_DELETE: return 0xD3;
+    case RETROK_MENU: return 0xDD;
+    default: return 0;
+    }
+}
+
+// Held by the keyboard and by the RetroPad's menu overlay (poll_input), by DIK.
+// A key is down for the guest while either holds it, so a pad press can't release
+// a typed key or the reverse. Both are written on the frontend thread only: the
+// keyboard callback runs inside input_poll_cb, which retro_run calls.
+static uint8_t kb_down[256], pad_down[256];
+
+static void apply_key(unsigned dik) { wl_key_set(dik, kb_down[dik] || pad_down[dik]); }
+
+static void RETRO_CALLCONV keyboard_event(bool down, unsigned keycode, uint32_t character,
+                                          uint16_t key_modifiers) {
+    (void)key_modifiers;
+    uint8_t dik = retrok_to_dik(keycode);
+    if (dik) {
+        kb_down[dik] = down;
+        apply_key(dik);
+    }
+    // WM_CHAR after its WM_KEYDOWN, in order. Auto-repeat presses come through
+    // here too (with the key already down), which is how a held key types.
+    if (down && character) wl_key_char(character);
+}
+
 void retro_set_environment(retro_environment_t cb) {
     env_cb = cb;
     bool no_rom = true;
     cb(RETRO_ENVIRONMENT_SET_SUPPORT_NO_GAME, &no_rom);
+    struct retro_keyboard_callback kcb = {keyboard_event};
+    cb(RETRO_ENVIRONMENT_SET_KEYBOARD_CALLBACK, &kcb);
 }
 void retro_set_video_refresh(retro_video_refresh_t cb)      { video_cb = cb; }
 void retro_set_audio_sample(retro_audio_sample_t cb)        { (void)cb; }
@@ -184,6 +286,51 @@ static int16_t axis(unsigned idx, unsigned ax) {
     return input_state_cb(0, RETRO_DEVICE_ANALOG, idx, ax);
 }
 
+// ---- mouse ----
+//
+// Two ways in, and the frontend sends whichever the player is using:
+//  - absolute (RTS, point-and-click): RETRO_DEVICE_POINTER, -32767..32767 over the
+//    picture. Applied only when it changes, because a frontend with no mouse
+//    reports a constant (0,0) and that must not park the cursor mid-screen;
+//  - captured (FPS): RETRO_DEVICE_MOUSE X/Y deltas, raw to DirectInput and
+//    integrated into the cursor.
+// Buttons and the wheel come from RETRO_DEVICE_MOUSE either way.
+static int16_t mouse(unsigned id) { return input_state_cb(0, RETRO_DEVICE_MOUSE, 0, id); }
+
+static void poll_mouse(void) {
+    static int16_t last_px, last_py;
+    int16_t px = input_state_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_X);
+    int16_t py = input_state_cb(0, RETRO_DEVICE_POINTER, 0, RETRO_DEVICE_ID_POINTER_Y);
+    if (px != last_px || py != last_py) {
+        last_px = px;
+        last_py = py;
+        int32_t gw, gh;
+        wl_game_size(&gw, &gh);
+        wl_cursor_set((int32_t)(((int64_t)px + 32767) * (gw - 1) / 65534),
+                      (int32_t)(((int64_t)py + 32767) * (gh - 1) / 65534));
+    }
+
+    int dx = mouse(RETRO_DEVICE_ID_MOUSE_X), dy = mouse(RETRO_DEVICE_ID_MOUSE_Y);
+    if (dx || dy) wl_cursor_move(dx, dy);
+
+    static const unsigned ids[5] = {RETRO_DEVICE_ID_MOUSE_LEFT, RETRO_DEVICE_ID_MOUSE_RIGHT,
+                                    RETRO_DEVICE_ID_MOUSE_MIDDLE, RETRO_DEVICE_ID_MOUSE_BUTTON_4,
+                                    RETRO_DEVICE_ID_MOUSE_BUTTON_5};
+    static bool held[5];
+    for (int b = 0; b < 5; b++) {
+        bool now = mouse(ids[b]) != 0;
+        if (now != held[b]) {
+            held[b] = now;
+            wl_cursor_button(b, now);
+        }
+    }
+
+    if (mouse(RETRO_DEVICE_ID_MOUSE_WHEELUP))         wl_cursor_wheel(1, 0);
+    if (mouse(RETRO_DEVICE_ID_MOUSE_WHEELDOWN))       wl_cursor_wheel(-1, 0);
+    if (mouse(RETRO_DEVICE_ID_MOUSE_HORIZ_WHEELUP))   wl_cursor_wheel(1, 1);
+    if (mouse(RETRO_DEVICE_ID_MOUSE_HORIZ_WHEELDOWN)) wl_cursor_wheel(-1, 1);
+}
+
 static void poll_input(void) {
     if (!input_state_cb) return;
 
@@ -218,12 +365,16 @@ static void poll_input(void) {
     // few keys for menu use: d-pad -> arrows, START -> Enter (accept), SELECT ->
     // Esc (back). Face buttons stay pad-only so in-game actions don't also fire
     // menu keys. (d-pad also moves in-game, redundant with the left stick.)
-    wl_key_set(0xC8, joy(RETRO_DEVICE_ID_JOYPAD_UP)    != 0);
-    wl_key_set(0xD0, joy(RETRO_DEVICE_ID_JOYPAD_DOWN)  != 0);
-    wl_key_set(0xCB, joy(RETRO_DEVICE_ID_JOYPAD_LEFT)  != 0);
-    wl_key_set(0xCD, joy(RETRO_DEVICE_ID_JOYPAD_RIGHT) != 0);
-    wl_key_set(0x1C, joy(RETRO_DEVICE_ID_JOYPAD_START) != 0); // Enter
-    wl_key_set(0x01, joy(RETRO_DEVICE_ID_JOYPAD_SELECT) != 0); // Esc
+    pad_down[0xC8] = joy(RETRO_DEVICE_ID_JOYPAD_UP)    != 0;
+    pad_down[0xD0] = joy(RETRO_DEVICE_ID_JOYPAD_DOWN)  != 0;
+    pad_down[0xCB] = joy(RETRO_DEVICE_ID_JOYPAD_LEFT)  != 0;
+    pad_down[0xCD] = joy(RETRO_DEVICE_ID_JOYPAD_RIGHT) != 0;
+    pad_down[0x1C] = joy(RETRO_DEVICE_ID_JOYPAD_START) != 0; // Enter
+    pad_down[0x01] = joy(RETRO_DEVICE_ID_JOYPAD_SELECT) != 0; // Esc
+    static const uint8_t overlay[] = {0xC8, 0xD0, 0xCB, 0xCD, 0x1C, 0x01};
+    for (unsigned i = 0; i < sizeof overlay; i++) apply_key(overlay[i]);
+
+    poll_mouse();
 }
 
 // ---- the core loop ----
@@ -317,6 +468,7 @@ bool retro_load_game(const struct retro_game_info *game) {
     // not open its own output.
     wl_core_audio = 1;
     wl_core_pad = 1;
+    wl_core_mouse = 1;
     wl_present_hook = core_present;
     wl_submit_frame = core_submit;
     if (pthread_create(&guest_tid, NULL, guest_main, NULL) != 0) {
