@@ -74,6 +74,8 @@ static bool frame_ready;      // latest holds a frame retro_run has not taken
 static bool have_frame;       // fb holds a valid frame to show
 static bool guest_started;
 static bool shutting_down;
+static bool guest_exited;     // the game ended the process; retro_run asks the frontend to stop
+static uint32_t guest_exit_code;
 static uint64_t last_run_ns;  // when retro_run last ran (0 = never), under mx
 
 static uint64_t now_ns(void) {
@@ -196,6 +198,20 @@ static void core_present(wl_frame_reader reader, uint32_t w, uint32_t h) {
     present_stats(t3);
     // game_ms measures from here to the next present, so it excludes this wait.
 }
+// The game called ExitProcess (or its main thread returned). Exiting the host
+// process from here would kill the frontend mid-stream: the client never hears
+// the session stopped, the recording and saves are lost, and the node reads it
+// as a crash. Instead flag it for retro_run, which asks the frontend to shut down
+// (RETRO_ENVIRONMENT_SHUTDOWN), and park this guest thread for good; retro_deinit
+// ends the process once the frontend has finished.
+static void core_process_exit(uint32_t code) {
+    pthread_mutex_lock(&mx);
+    guest_exited = true;
+    guest_exit_code = code;
+    pthread_cond_broadcast(&cv_run);
+    for (;;) pthread_cond_wait(&cv_run, &mx);
+}
+
 // Decoded intro movies pace themselves (dshow.c sleeps to the movie's rate).
 static void core_submit(const uint32_t *xrgb, uint32_t w, uint32_t h) {
     publish_frame(NULL, xrgb, w, h);
@@ -528,6 +544,23 @@ void retro_run(void) {
     // carries) stays at 60 whatever the game's own frame rate is.
     uint64_t t = now_ns();
     pthread_mutex_lock(&mx);
+    if (guest_exited) {
+        static bool asked;
+        uint32_t code = guest_exit_code;
+        pthread_mutex_unlock(&mx);
+        if (!asked) {
+            asked = true;
+            LOGI("libretro: game exited (%u); asking the frontend to shut down", code);
+            if (!env_cb || !env_cb(RETRO_ENVIRONMENT_SHUTDOWN, NULL)) {
+                // A frontend that cannot shut down on request: end as before.
+                LOGI("libretro: frontend has no SHUTDOWN; exiting");
+                fflush(NULL);
+                _exit((int)code);
+            }
+        }
+        if (video_cb) video_cb(NULL, rep_w, rep_h, (size_t)rep_w * 4);
+        return;
+    }
     uint64_t prev_run = last_run_ns;
     last_run_ns = t;
     if (frame_ready) {
@@ -621,6 +654,7 @@ bool retro_load_game(const struct retro_game_info *game) {
     wl_core_mouse = 1;
     wl_present_hook = core_present;
     wl_submit_frame = core_submit;
+    wl_process_exit_hook = core_process_exit;
     if (pthread_create(&guest_tid, NULL, guest_main, NULL) != 0) {
         LOGE("libretro: failed to start guest thread: %s", strerror(errno));
         wl_present_hook = NULL;

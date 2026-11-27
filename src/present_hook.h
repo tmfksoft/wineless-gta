@@ -24,6 +24,11 @@ extern void (*wl_present_hook)(wl_frame_reader reader, uint32_t w, uint32_t h);
 // thread outside the guest's Present path. Set by the core; NULL in standalone.
 extern void (*wl_submit_frame)(const uint32_t *xrgb, uint32_t w, uint32_t h);
 
+// Set by the core; NULL in standalone. Called (on whichever guest thread ends the
+// process) instead of exiting the host process, so the frontend can shut down
+// properly: it never returns. In standalone the process simply exits.
+extern void (*wl_process_exit_hook)(uint32_t code);
+
 // ---- audio bridge (dsound.c) ----
 // When non-zero, dsound does NOT open its own output (SDL device / null thread);
 // the libretro core becomes the sole consumer of the mixer and pulls samples in

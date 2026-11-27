@@ -7,6 +7,7 @@
 #include <unistd.h>
 
 #include "../heap.h"
+#include "../present_hook.h"
 #include "../pe.h"
 #include "../vfs.h"
 #include "win32.h"
@@ -89,6 +90,11 @@ void win32_init(const char *cmdline) {
 
 void win32_process_exit(uint32_t code) {
     LOGI("process exit (%u)", code);
+    // libretro core: hand the exit to the core, which asks the frontend to shut
+    // down (STOPPED to clients, recording and saves finalised) and parks this
+    // thread. The window is left up: the game's other threads still run until
+    // the frontend unloads the core.
+    if (wl_process_exit_hook) { fflush(NULL); wl_process_exit_hook(code); }
     user32_shutdown();
     fflush(NULL);
     _exit((int)code);
