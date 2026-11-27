@@ -51,6 +51,10 @@ typedef struct Buf {
     int32_t volume, pan;
     int playing, looping;
     double pos; // in frames
+    // Starvation guard for streamed buffers: frames played since the game last
+    // wrote (Unlock) and how many writes it has made while playing. See mix().
+    double stale;
+    uint32_t refills;
     // 3D
     Vec3 p, v;
     float min_dist, max_dist;
@@ -186,6 +190,21 @@ static void mix(float *out, int frames) {
         gains_for(b, &gl, &gr);
         uint32_t start_byte = (uint32_t)b->pos * b->block;
         int wrapped = 0;
+        // A looping buffer the game streams into (refilled while playing) that it
+        // has not written for a whole lap holds nothing but audio already heard.
+        // Real DirectSound would replay it, but a game that stalls for most of a
+        // second (AoE2 HD on a slow node) then repeats the same chunk over and
+        // over. Play silence instead, keep the cursor moving so the game's
+        // position reads and notifications stay right, and resume on its next write.
+        // A buffer written once and looped (an ambient loop) never counts as streamed.
+        int starved = b->looping && b->refills >= 2 && b->stale >= nframes;
+        b->stale += step * frames;
+        if (starved) {
+            b->pos += step * frames;
+            while (b->pos >= nframes) { b->pos -= nframes; wrapped = 1; }
+            if (b->nnotify) fire_notifications(b, start_byte, (uint32_t)b->pos * b->block, wrapped);
+            continue;
+        }
         for (int i = 0; i < frames; i++) {
             uint32_t i0 = (uint32_t)b->pos;
             float fr = (float)(b->pos - i0);
@@ -422,6 +441,7 @@ static uint32_t b_lock(uint32_t *a) {
 static uint32_t b_play(uint32_t *a) {
     Buf *b = buf_of(a[0]);
     pthread_mutex_lock(&ds_lock);
+    if (!b->playing) { b->stale = 0; b->refills = 0; }
     b->playing = 1;
     b->looping = (a[3] & DSBPLAY_LOOPING) != 0;
     pthread_mutex_unlock(&ds_lock);
@@ -471,7 +491,14 @@ static uint32_t b_stop(uint32_t *a) {
     pthread_mutex_unlock(&ds_lock);
     return DS_OK;
 }
-static uint32_t b_unlock(uint32_t *a) { return DS_OK; }
+static uint32_t b_unlock(uint32_t *a) {
+    Buf *b = buf_of(a[0]);
+    pthread_mutex_lock(&ds_lock);
+    b->stale = 0;
+    if (b->playing && b->refills < 0xFFFFFFFFu) b->refills++;
+    pthread_mutex_unlock(&ds_lock);
+    return DS_OK;
+}
 static uint32_t b_restore(uint32_t *a) { return DS_OK; }
 static uint32_t b_setfx(uint32_t *a) { return DSERR_CONTROLUNAVAIL; }
 static uint32_t b_acquire(uint32_t *a) { return DS_OK; }
