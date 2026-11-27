@@ -64,7 +64,7 @@ jobs:
       packages: write
     steps:
     - run: test -s dist/wineless_libretro.so && sha256sum dist/wineless_libretro.so
-    - uses: branchd/steps/package-publish@v1
+    - uses: branchd/steps/forge/package-publish@v1
       isolated: true
       workspace: [dist/wineless_libretro.so]
       with:
