@@ -65,6 +65,28 @@ void wl_game_size(int32_t *w, int32_t *h);
 // One typed character (a Unicode code point) as WM_CHAR, after its WM_KEYDOWN.
 void wl_key_char(uint32_t codepoint);
 
+// ---- the cursor, reported up to the frontend (user32.c; PXS-281) ----
+// What the game wants from the mouse and what its cursor looks like, for a
+// frontend that can capture the player's pointer or draw the cursor itself.
+#define WL_CURSOR_MAX_SIDE 256
+typedef struct {
+    int relative;          // wants raw motion: DirectInput exclusive mouse, raw input
+                           // with NOLEGACY/CAPTUREMOUSE, or hide + recentre every frame
+    int visible;           // ShowCursor count >= 0 and a non-NULL SetCursor, or a shown D3D cursor
+    uint32_t image_id;     // 0 = no image the core could read
+    uint32_t w, h;
+    int32_t hot_x, hot_y;
+    const char *named;     // a CSS keyword for an IDC_* system cursor, or NULL
+} wl_cursor_info;
+// Fills `out`. When image_id is set and differs from `have_id`, also copies its
+// w*h pixels (0xAARRGGBB, straight alpha, top row first) into `argb`, which holds
+// WL_CURSOR_MAX_SIDE^2. Call from the frontend thread.
+void wl_cursor_query(wl_cursor_info *out, uint32_t *argb, uint32_t have_id);
+// The D3D hardware cursor's image (d3d9 bridge, SetCursorProperties).
+void wl_cursor_hw_image(const uint32_t *argb, uint32_t w, uint32_t h, int32_t hot_x, int32_t hot_y);
+// +1 when a DirectInput mouse in exclusive mode is acquired, -1 when it is released (dinput8.c).
+void wl_cursor_di_exclusive(int delta);
+
 // ---- native virtual gamepad (dinput_pad.c) ----
 // When set (before the guest boots), a virtual Xbox-style pad is attached so the
 // game sees a real controller with analog sticks. The core drives it from the

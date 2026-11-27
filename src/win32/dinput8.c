@@ -6,6 +6,7 @@
 
 #include "com.h"
 #include "../heap.h"
+#include "../present_hook.h"
 #include "dinput_pad.h"
 #include "win32.h"
 
@@ -256,7 +257,25 @@ API(user32, GetKeyboardState, 1) {
 
 // ---------------------------------------------------------------- devices
 enum { DEV_KEYBOARD, DEV_MOUSE, DEV_PAD };
-typedef struct { int type; uint32_t data_size; PadDev *pad; } Dev;
+typedef struct {
+    int type;
+    uint32_t data_size;
+    PadDev *pad;
+    uint32_t coop;      // SetCooperativeLevel flags
+    int acquired;
+    int excl_counted;   // this mouse is counted in wl_cursor_di_exclusive
+} Dev;
+#define DISCL_EXCLUSIVE 0x1
+
+// An exclusive, acquired DirectInput mouse is how a DirectX-era game says "give me
+// raw motion" (FPS camera), which the libretro core reports upward (PXS-281).
+static void dev_update_exclusive(Dev *d, int acquired) {
+    int want = d->type == DEV_MOUSE && acquired && (d->coop & DISCL_EXCLUSIVE);
+    if (want != d->excl_counted) {
+        wl_cursor_di_exclusive(want ? 1 : -1);
+        d->excl_counted = want;
+    }
+}
 
 static const uint8_t SYS_D4[8] = {0xBF, 0xC7, 0x44, 0x45, 0x53, 0x54, 0x00, 0x00};
 #define DIERR_INPUTLOST 0x8007001Eu
@@ -274,6 +293,16 @@ static uint32_t dev_getcaps(uint32_t *a) {
     return DI_OK;
 }
 static uint32_t dev_ok(uint32_t *a) { return DI_OK; }
+// SetCooperativeLevel(hwnd, flags)
+static uint32_t dev_setcoop(uint32_t *a) {
+    Dev *d = com_host(a[0]);
+    d->coop = a[2];
+    if (d->type == DEV_MOUSE) {
+        LOGD("dinput: mouse cooperative level 0x%x", d->coop);
+        dev_update_exclusive(d, d->acquired);
+    }
+    return DI_OK;
+}
 static uint32_t dev_getprop(uint32_t *a) {
     Dev *d = com_host(a[0]);
     if (d->type == DEV_PAD) return pad_getprop(d->pad, a[1], G2H(a[2]));
@@ -288,6 +317,8 @@ static uint32_t dev_acquire(uint32_t *a) {
     Dev *d = com_host(a[0]);
     if (d->type == DEV_MOUSE) {
         mouse_acquired = 1;
+        d->acquired = 1;
+        dev_update_exclusive(d, 1);
         if (last_window && have_focus) SDL_SetWindowRelativeMouseMode(last_window, true);
     }
     if (d->type == DEV_PAD && !pad_connected(d->pad)) return DIERR_UNPLUGGED;
@@ -297,6 +328,8 @@ static uint32_t dev_unacquire(uint32_t *a) {
     Dev *d = com_host(a[0]);
     if (d->type == DEV_MOUSE) {
         mouse_acquired = 0;
+        d->acquired = 0;
+        dev_update_exclusive(d, 0);
         if (last_window) SDL_SetWindowRelativeMouseMode(last_window, false);
     }
     return DI_OK;
@@ -381,7 +414,7 @@ static uint32_t make_dev(int type, PadDev *pad) {
             {dev_getdata, 5},       // GetDeviceData
             {dev_setformat, 2},     // SetDataFormat
             {dev_ok, 2},            // SetEventNotification
-            {dev_ok, 3},            // SetCooperativeLevel
+            {dev_setcoop, 3},       // SetCooperativeLevel
             {dev_getobjectinfo, 4}, // GetObjectInfo
             {dev_getinfo, 2},       // GetDeviceInfo
             {dev_ok, 3},            // RunControlPanel
