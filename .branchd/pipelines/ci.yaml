@@ -21,7 +21,7 @@ jobs:
     # The dependency build (glslang, SDL3, ogg/vorbis, DXVK) is slow and fully pinned by the
     # script and patches; bump the key when either changes.
     cache:
-      key: deps-ubuntu2204-dxvk2.7.1-sdl3.4.8-v1
+      key: deps-ubuntu2204-dxvk2.7.1-sdl3.4.8-v2
       paths:
       - deps
     steps:

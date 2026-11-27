@@ -1,0 +1,29 @@
+diff --git a/src/dxvk/dxvk_device_info.cpp b/src/dxvk/dxvk_device_info.cpp
+index 9a45f10..f8c45f7 100644
+--- a/src/dxvk/dxvk_device_info.cpp
++++ b/src/dxvk/dxvk_device_info.cpp
+@@ -497,6 +497,24 @@ namespace dxvk {
+       m_featuresSupported.extVertexAttributeDivisor.vertexAttributeInstanceRateZeroDivisor = VK_FALSE;
+     }
+ 
++    // Wineless: Mesa's VK_EXT_headless_surface swapchain (SDL's "offscreen"
++    // driver, used on display-less emulation nodes) never implements
++    // wait_for_present in any release up to at least 25.3, and release builds
++    // compile out the assert in wsi_WaitForPresentKHR, so the presenter's frame
++    // thread calls a NULL pointer on the first FIFO present. Present wait only
++    // drives frame pacing; without it the presenter falls back to its limiter.
++    // WINELESS_PRESENT_WAIT=1 forces it back on, =0 forces it off.
++    { std::string pw = env::getEnvVar("WINELESS_PRESENT_WAIT");
++      bool disablePresentWait = pw.empty()
++        ? env::getEnvVar("SDL_VIDEO_DRIVER") == "offscreen"
++        : pw == "0";
++
++      if (disablePresentWait && m_featuresSupported.khrPresentWait.presentWait) {
++        Logger::info("DXVK: present wait disabled (headless surface)");
++        m_featuresSupported.khrPresentWait.presentWait = VK_FALSE;
++      }
++    }
++
+     // For line rasterization, ensure that the feature set actually makes sense
+     if (!m_featuresSupported.core.features.wideLines || !m_featuresSupported.extLineRasterization.rectangularLines) {
+       m_featuresSupported.core.features.wideLines = VK_FALSE;
