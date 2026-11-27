@@ -1,12 +1,13 @@
 // libretro core entry points for Wineless.
 //
 // P2: boots a real guest on its own thread and streams its frames to the
-// frontend via a present-barrier. The guest runs its own main loop (never
-// returns); at each frame present (the wl_present_hook, wired in the ddraw /
-// d3d9 / d3d8 present chokepoints) it reads the just-rendered frame back to CPU
-// pixels, hands it over, and blocks so the frontend paces it. retro_run() on the
-// frontend thread consumes the latest frame, emits it via video_refresh, and
-// releases the guest for the next one.
+// frontend. The guest runs its own main loop (never returns); at each frame
+// present (the wl_present_hook, wired in the ddraw / d3d9 / d3d8 present
+// chokepoints) it reads the just-rendered frame back to CPU pixels, hands it
+// over, and sleeps to the next tick of its own 60 Hz clock (the frame cap).
+// retro_run() on the frontend thread takes the newest frame if there is one and
+// never waits for the guest, so the frontend holds 60 fps and real-time audio
+// whatever the game's own frame rate.
 //
 // Input: the RetroPad drives a virtual Xbox pad (plus a few menu keys), and a
 // frontend that sends a keyboard and mouse (RETRO_DEVICE_KEYBOARD via the
@@ -53,17 +54,66 @@ static retro_audio_sample_batch_t audio_batch_cb;
 static retro_input_poll_t    input_poll_cb;
 static retro_input_state_t   input_state_cb;
 
-// ---- present-barrier state ----
+// ---- frame hand-off state ----
+//
+// The guest and the frontend run on their own clocks. The guest renders as fast
+// as it can, up to a 60 Hz cap enforced on its own thread (a software vsync in
+// core_present); the frontend's retro_run never waits for it. Frames move through
+// three buffers so neither side copies under the lock: the guest reads back into
+// `back`, then swaps it with `latest`; retro_run swaps `latest` with `fb` when a
+// new one is there. A frame the frontend has not taken yet is simply replaced.
 static pthread_mutex_t mx = PTHREAD_MUTEX_INITIALIZER;
-static pthread_cond_t  cv_ready    = PTHREAD_COND_INITIALIZER; // guest -> frontend
-static pthread_cond_t  cv_consumed = PTHREAD_COND_INITIALIZER; // frontend -> guest
-static uint32_t *latest;      // guest writes the just-rendered frame here (w-packed)
-static uint32_t *fb;          // frontend's copy, fed to video_refresh / duplicated
-static int cur_w = WL_DEF_W, cur_h = WL_DEF_H;  // dims of the latest frame
+static pthread_cond_t  cv_run = PTHREAD_COND_INITIALIZER; // retro_run -> a guest parked while paused
+static uint32_t *back;        // guest thread's scratch: the frame being read back
+static uint32_t *latest;      // newest complete guest frame, not yet taken
+static uint32_t *fb;          // frontend's frame, fed to video_refresh
+static int cur_w = WL_DEF_W, cur_h = WL_DEF_H;  // dims of `latest`
+static int fb_w = WL_DEF_W, fb_h = WL_DEF_H;    // dims of `fb`
 static int rep_w = WL_DEF_W, rep_h = WL_DEF_H;  // dims last reported to the frontend
-static bool frame_ready;      // latest holds an unconsumed frame
+static bool frame_ready;      // latest holds a frame retro_run has not taken
 static bool have_frame;       // fb holds a valid frame to show
 static bool guest_started;
+static bool shutting_down;
+static uint64_t last_run_ns;  // when retro_run last ran (0 = never), under mx
+
+static uint64_t now_ns(void) {
+    struct timespec t;
+    clock_gettime(CLOCK_MONOTONIC, &t);
+    return (uint64_t)t.tv_sec * 1000000000ull + (uint64_t)t.tv_nsec;
+}
+
+// The guest's frame cap. 60 for every game for now: the stream is 60 fps, so a
+// guest frame faster than that would only be dropped.
+#define WL_VSYNC_NS (1000000000ull / 60ull)
+// retro_run silent for this long means the frontend is paused (or not started):
+// park the guest at its next present, as the old blocking barrier used to.
+#define WL_PAUSE_NS (250ull * 1000000ull)
+
+// Present-path timing, logged every 5 s next to the bridge's own fps line, so a
+// slow game says where its frame time goes: its own work, the readback, the
+// D3D present itself (d3d9/d3d8 bridges report that via wl_present_timing), or
+// the vsync wait.
+static struct {
+    uint64_t window_start, last_present;
+    unsigned presents, dropped;
+    double game_ms, readback_ms, vsync_ms, dpresent_ms, worst_gap_ms;
+} pt;
+static void core_present_timing(double present_ms) { pt.dpresent_ms += present_ms; } // guest thread only
+
+static void present_stats(uint64_t t) {
+    if (!pt.window_start) { pt.window_start = t; return; }
+    double win = (double)(t - pt.window_start) / 1e9;
+    if (win < 5.0) return;
+    if (pt.presents) {
+        double n = pt.presents;
+        LOGI("libretro: %.1f presents/s; per frame game %.1fms, readback %.1fms, d3d present %.1fms, vsync wait %.1fms; worst gap %.0fms; %u not taken",
+             n / win, pt.game_ms / n, pt.readback_ms / n, pt.dpresent_ms / n, pt.vsync_ms / n, pt.worst_gap_ms, pt.dropped);
+    }
+    uint64_t lp = pt.last_present;
+    memset(&pt, 0, sizeof pt);
+    pt.window_start = t;
+    pt.last_present = lp;
+}
 
 // ---- guest thread ----
 static pthread_t guest_tid;
@@ -80,32 +130,76 @@ static void *guest_main(void *arg) {
     return NULL;
 }
 
-// Publish one frame into `latest` and block until the frontend consumes it,
-// pacing the producer to the frontend's retro_run cadence. The frame comes
-// either from a reader callback (reads a GPU backbuffer) or a packed CPU buffer
-// (decoded movies). Called on the guest thread or the movie decode thread; the
-// two don't present concurrently (the main thread is idle during intro movies).
+// Publish one frame: fill `back` outside the lock, then swap it in as `latest`.
+// Never waits for the frontend (that is what made the old barrier drag the
+// frontend's loop down to the guest's speed). Called on the guest thread or the
+// movie decode thread; the two don't present concurrently (the main thread is
+// idle during intro movies).
 static void publish_frame(wl_frame_reader reader, const uint32_t *src, uint32_t w, uint32_t h) {
-    if ((!reader && !src) || !w || !h) return;
+    if ((!reader && !src) || !w || !h || !back) return;
     if (w > WL_MAX_W) w = WL_MAX_W;
     if (h > WL_MAX_H) h = WL_MAX_H;
+    if (reader) {
+        if (!reader(back, w)) return;                  // unreadable: keep showing the last frame
+    } else {
+        memcpy(back, src, (size_t)w * h * 4);
+    }
     pthread_mutex_lock(&mx);
-    if (reader) reader(latest, w);                     // read backbuffer into latest (w-packed)
-    else        memcpy(latest, src, (size_t)w * h * 4); // copy packed CPU pixels
+    uint32_t *t = latest; latest = back; back = t;
+    if (frame_ready) pt.dropped++;
     cur_w = (int)w;
     cur_h = (int)h;
     frame_ready = true;
-    pthread_cond_signal(&cv_ready);
-    while (frame_ready)
-        pthread_cond_wait(&cv_consumed, &mx);
     pthread_mutex_unlock(&mx);
 }
 
-// Present-barrier hooks (see present_hook.h). GPU backbuffer path and the
-// direct-pixel path (decoded movies) both funnel through publish_frame.
-static void core_present(wl_frame_reader reader, uint32_t w, uint32_t h) {
-    publish_frame(reader, NULL, w, h);
+// While the frontend is paused (or has not started running frames), hold the
+// guest here so the game pauses with it, as it did under the blocking barrier.
+static void park_while_paused(void) {
+    pthread_mutex_lock(&mx);
+    while (!shutting_down && (!last_run_ns || now_ns() - last_run_ns > WL_PAUSE_NS)) {
+        struct timespec ts;
+        clock_gettime(CLOCK_REALTIME, &ts);
+        ts.tv_nsec += 50 * 1000000L;
+        if (ts.tv_nsec >= 1000000000L) { ts.tv_sec++; ts.tv_nsec -= 1000000000L; }
+        pthread_cond_timedwait(&cv_run, &mx, &ts);
+    }
+    pthread_mutex_unlock(&mx);
 }
+
+// The guest's present (d3d9 / d3d8 / ddraw): hand the frame over, then sleep to
+// the next 60 Hz tick of the guest's own clock. That is the frame cap; a game
+// slower than 60 never sleeps here and runs at whatever rate it manages.
+static void core_present(wl_frame_reader reader, uint32_t w, uint32_t h) {
+    static uint64_t next_vsync;
+    uint64_t t0 = now_ns();
+    if (pt.last_present) {
+        double gap = (double)(t0 - pt.last_present) / 1e6;
+        pt.game_ms += gap;
+        if (gap > pt.worst_gap_ms) pt.worst_gap_ms = gap;
+    }
+    publish_frame(reader, NULL, w, h);
+    uint64_t t1 = now_ns();
+    pt.readback_ms += (double)(t1 - t0) / 1e6;
+
+    park_while_paused();
+
+    uint64_t t2 = now_ns();
+    if (!next_vsync || t2 > next_vsync + WL_VSYNC_NS) next_vsync = t2; // late: re-phase, don't burst
+    next_vsync += WL_VSYNC_NS;
+    if (next_vsync > t2) {
+        struct timespec ts = {(time_t)(next_vsync / 1000000000ull), (long)(next_vsync % 1000000000ull)};
+        while (clock_nanosleep(CLOCK_MONOTONIC, TIMER_ABSTIME, &ts, NULL) == EINTR) {}
+    }
+    uint64_t t3 = now_ns();
+    pt.vsync_ms += (double)(t3 - t2) / 1e6;
+    pt.presents++;
+    pt.last_present = t3;
+    present_stats(t3);
+    // game_ms measures from here to the next present, so it excludes this wait;
+    // the bridge's D3D present happens in that window and is reported apart.
+}
+// Decoded intro movies pace themselves (dshow.c sleeps to the movie's rate).
 static void core_submit(const uint32_t *xrgb, uint32_t w, uint32_t h) {
     publish_frame(NULL, xrgb, w, h);
 }
@@ -223,16 +317,18 @@ void retro_set_input_poll(retro_input_poll_t cb)           { input_poll_cb = cb;
 void retro_set_input_state(retro_input_state_t cb)         { input_state_cb = cb; }
 
 void retro_init(void) {
+    back   = calloc((size_t)WL_MAX_W * WL_MAX_H, 4);
     latest = calloc((size_t)WL_MAX_W * WL_MAX_H, 4);
     fb     = calloc((size_t)WL_MAX_W * WL_MAX_H, 4);
 }
 void retro_deinit(void) {
-    // Unhook the present-barrier and release the guest if it is blocked there.
+    // Unhook the present path and release the guest if it is parked there.
     pthread_mutex_lock(&mx);
     wl_present_hook = NULL;
     wl_submit_frame = NULL;
-    frame_ready = false;
-    pthread_cond_signal(&cv_consumed);
+    wl_present_timing = NULL;
+    shutting_down = true;
+    pthread_cond_broadcast(&cv_run);
     pthread_mutex_unlock(&mx);
 
     // The guest runs an infinite game loop on its own thread that cannot be
@@ -431,26 +527,22 @@ void retro_run(void) {
     poll_input();
     report_cursor();
 
-    // Wait briefly for a fresh guest frame; if none (guest loading / slow),
-    // duplicate the last frame so the stream keeps flowing.
-    struct timespec ts;
-    clock_gettime(CLOCK_REALTIME, &ts);
-    ts.tv_nsec += 20 * 1000 * 1000;              // ~20ms (one 50fps frame)
-    if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; }
-
-    int w = rep_w, h = rep_h;
+    // Take the newest guest frame if there is one; never wait for it. With no new
+    // frame the last one is shown again, so the frontend's loop (and the audio it
+    // carries) stays at 60 whatever the game's own frame rate is.
+    uint64_t t = now_ns();
     pthread_mutex_lock(&mx);
-    while (!frame_ready) {
-        if (pthread_cond_timedwait(&cv_ready, &mx, &ts) == ETIMEDOUT) break;
-    }
+    uint64_t prev_run = last_run_ns;
+    last_run_ns = t;
     if (frame_ready) {
-        w = cur_w; h = cur_h;
-        memcpy(fb, latest, (size_t)w * h * 4);
+        uint32_t *sw = fb; fb = latest; latest = sw;
+        fb_w = cur_w; fb_h = cur_h;
         have_frame = true;
-        frame_ready = false;                      // release the guest
-        pthread_cond_signal(&cv_consumed);
+        frame_ready = false;
     }
+    pthread_cond_broadcast(&cv_run);
     pthread_mutex_unlock(&mx);
+    int w = fb_w, h = fb_h;
 
     // If the guest's resolution changed, tell the frontend before presenting.
     if (have_frame && (w != rep_w || h != rep_h)) {
@@ -465,14 +557,28 @@ void retro_run(void) {
     else if (video_cb)
         video_cb(NULL, rep_w, rep_h, (size_t)rep_w * 4); // dupe (frontend repeats)
 
-    // Drain the guest's audio mixer (DirectSound + movies + waveout) and hand it
-    // to the frontend. One pull per frame keeps A/V in step: ~sample_rate/fps
-    // samples each retro_run, whether or not a new video frame arrived.
+    // Drain the guest's audio mixer (DirectSound + movies + waveout) by the wall
+    // clock: the samples owed since the last retro_run, so a late frame costs no
+    // audio and the mixer advances in real time, as the game's own clock does.
+    // A long gap (paused, first run) restarts at one frame's worth rather than
+    // dumping a backlog.
     if (audio_batch_cb) {
         static int16_t ab[2 * 2048];
-        int want = (int)(WL_SAMPLE_RATE / WL_FB_FPS);
-        int got = wl_audio_pull(ab, want);
-        if (got > 0) audio_batch_cb(ab, (size_t)got);
+        static double owed;
+        double frame_samples = WL_SAMPLE_RATE / WL_FB_FPS;
+        if (!prev_run || t - prev_run > WL_PAUSE_NS) {
+            owed = 0.0;
+            prev_run = t - WL_VSYNC_NS;
+        }
+        owed += (double)(t - prev_run) / 1e9 * WL_SAMPLE_RATE;
+        if (owed > 4.0 * frame_samples) owed = 4.0 * frame_samples; // bound a hiccup's catch-up
+        int want = (int)owed;
+        if (want > 2048) want = 2048;
+        if (want > 0) {
+            int got = wl_audio_pull(ab, want);
+            if (got > 0) audio_batch_cb(ab, (size_t)got);
+            owed -= want;
+        }
     }
 }
 
@@ -519,6 +625,7 @@ bool retro_load_game(const struct retro_game_info *game) {
     wl_core_mouse = 1;
     wl_present_hook = core_present;
     wl_submit_frame = core_submit;
+    wl_present_timing = core_present_timing;
     if (pthread_create(&guest_tid, NULL, guest_main, NULL) != 0) {
         LOGE("libretro: failed to start guest thread: %s", strerror(errno));
         wl_present_hook = NULL;

@@ -360,7 +360,15 @@ OVERRIDE(IDirect3DDevice9, Present, 5) {
         nanosleep(&ts, nullptr);
         return D3D_OK;
     }
-    return (uint32_t)dev->Present((const RECT *)G2H(g[1]), (const RECT *)G2H(g[2]), nullptr, nullptr);
+    if (!wl_present_timing)
+        return (uint32_t)dev->Present((const RECT *)G2H(g[1]), (const RECT *)G2H(g[2]), nullptr, nullptr);
+    // libretro core: report how long the real present takes, for its frame-time log.
+    struct timespec p0, p1;
+    clock_gettime(CLOCK_MONOTONIC, &p0);
+    HRESULT phr = dev->Present((const RECT *)G2H(g[1]), (const RECT *)G2H(g[2]), nullptr, nullptr);
+    clock_gettime(CLOCK_MONOTONIC, &p1);
+    wl_present_timing((p1.tv_sec - p0.tv_sec) * 1e3 + (p1.tv_nsec - p0.tv_nsec) / 1e6);
+    return (uint32_t)phr;
 }
 OVERRIDE(IDirect3DDevice9, CreateAdditionalSwapChain, 3) {
     GuestPP *gpp = (GuestPP *)G2H(g[1]);
