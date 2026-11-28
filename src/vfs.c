@@ -432,7 +432,15 @@ bool vfs_set_cwd(const char *winpath) {
     vfs_full_path(winpath, full, sizeof full);
     if (!vfs_to_host(full, host, sizeof host)) return false;
     struct stat st;
-    if (stat(host, &st) || !S_ISDIR(st.st_mode)) return false;
+    if (stat(host, &st) || !S_ISDIR(st.st_mode)) {
+        // A game served from an .asar only has its code extracted to disk; its data
+        // directories (GTA SA's TEXT, DATA, AUDIO...) exist only in the archive. Games
+        // that SetCurrentDirectory into one and then open a bare name (CFileMgr::SetDir
+        // + fopen("AMERICAN.GXT")) need the cwd to move there, or the open resolves
+        // against C:\game, fails, and the guest reads through a NULL FILE*.
+        int is_dir = 0;
+        if (!vfs_archive_entry(full, NULL, NULL, &is_dir) || !is_dir) return false;
+    }
     snprintf(cwd, sizeof cwd, "%s", full);
     size_t l = strlen(cwd);
     if (l > 3 && cwd[l - 1] == '\\') cwd[l - 1] = 0;
